@@ -23,6 +23,10 @@ from pydantic import BaseModel
 from fastapi.security.api_key import APIKeyHeader, APIKey
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from sse_starlette.sse import EventSourceResponse
+import json
+import base64
+import struct
 
 
 os.environ["TTS_HOME"] = "/app/coqui-tts"
@@ -382,14 +386,14 @@ async def get_usage(api_key: str = Depends(get_api_key)):
         }
     }
 
-# Add a new streaming HTTP endpoint with proper WAV formatting
-@app.post("/tts-stream-http")
+# Update the endpoint name and implementation for better performance
+@app.post("/tts-http-stream")
 async def generate_audio_http_stream(
     request: TTSRequest,
     api_key: APIKey = Depends(get_api_key)
 ):
     try:
-        # Log usage for the API key (in a real app, store this in a database)
+        # Log usage for the API key
         print(f"API request from user: {API_KEYS[api_key]['user']}")
         
         text = request.text
@@ -398,50 +402,79 @@ async def generate_audio_http_stream(
             
         print(f"Processing text: {text} using HTTP streaming")
         
-        # Create a function to properly format WAV stream
-        async def wav_stream_generator():
-            try:
-                # Choose model based on text content
-                if has_chinese(text):
-                    # Use XTTS v2 for Chinese text
-                    with torch.inference_mode():
-                        wav = global_chinese_tts.tts(
-                            text=text,
-                            speaker_wav=sample_wav_path,
-                            language="zh"
-                        )
-                else:
-                    # Use FastPitch for English text
-                    with torch.inference_mode():
-                        wav = global_tts.tts(text=text)
+        # Create efficient binary stream generator
+        async def binary_stream_generator():
+            # Create WAV header first
+            sample_rate = 22050
+            bits_per_sample = 16
+            channels = 1
+            
+            # Create a buffer for the WAV header
+            header_buffer = io.BytesIO()
+            
+            # RIFF header
+            header_buffer.write(b'RIFF')
+            header_buffer.write(b'\x00\x00\x00\x00')  # placeholder for file size
+            header_buffer.write(b'WAVE')
+            
+            # Format chunk
+            header_buffer.write(b'fmt ')
+            header_buffer.write(struct.pack('<I', 16))  # subchunk size (16 for PCM)
+            header_buffer.write(struct.pack('<H', 1))   # PCM format
+            header_buffer.write(struct.pack('<H', channels))  # channels
+            header_buffer.write(struct.pack('<I', sample_rate))  # sample rate
+            header_buffer.write(struct.pack('<I', sample_rate * channels * bits_per_sample // 8))  # byte rate
+            header_buffer.write(struct.pack('<H', channels * bits_per_sample // 8))  # block align
+            header_buffer.write(struct.pack('<H', bits_per_sample))  # bits per sample
+            
+            # Data chunk header
+            header_buffer.write(b'data')
+            header_buffer.write(b'\x00\x00\x00\x00')  # placeholder for data size
+            
+            # Send the header
+            yield header_buffer.getvalue()
+            
+            # Buffer to collect audio data for size calculations
+            data_buffer = bytearray()
+            
+            # Stream audio chunks
+            async for audio_chunk in generate_audio_ws(text):
+                if audio_chunk:
+                    data_buffer.extend(audio_chunk)
+                    yield audio_chunk
+            
+            # Calculate sizes and update the header
+            data_size = len(data_buffer)
+            file_size = data_size + 36  # 36 is the size of the header minus 8 bytes
+            
+            # Create updated header with correct sizes
+            header_buffer = io.BytesIO()
+            header_buffer.write(b'RIFF')
+            header_buffer.write(struct.pack('<I', file_size))
+            header_buffer.write(b'WAVE')
+            header_buffer.write(b'fmt ')
+            header_buffer.write(struct.pack('<I', 16))
+            header_buffer.write(struct.pack('<H', 1))
+            header_buffer.write(struct.pack('<H', channels))
+            header_buffer.write(struct.pack('<I', sample_rate))
+            header_buffer.write(struct.pack('<I', sample_rate * channels * bits_per_sample // 8))
+            header_buffer.write(struct.pack('<H', channels * bits_per_sample // 8))
+            header_buffer.write(struct.pack('<H', bits_per_sample))
+            header_buffer.write(b'data')
+            header_buffer.write(struct.pack('<I', data_size))
+            
+            # Note: We don't send this updated header because 
+            # clients have already processed the initial header
                 
-                # Normalize and convert to 16-bit PCM
-                wav = np.clip(wav, -1, 1)
-                wav = (wav * 32767).astype(np.int16)
-                
-                # Create WAV file in memory
-                buffer = io.BytesIO()
-                wavfile.write(buffer, 22050, wav)  # Sample rate is 22050 Hz
-                buffer.seek(0)
-                
-                # Read and yield chunks
-                chunk = buffer.read(4096)  # Read larger chunks for better streaming
-                while chunk:
-                    yield chunk
-                    chunk = buffer.read(4096)
-                    
-            except Exception as e:
-                print(f"Error streaming audio: {e}")
-                raise
-                
-        # Return a streaming response with the WAV file
+        # Return the streaming response
         return StreamingResponse(
-            wav_stream_generator(), 
+            binary_stream_generator(),
             media_type="audio/wav",
             headers={
                 "Content-Disposition": f"attachment; filename=tts_output_{int(time.time())}.wav"
             }
         )
+        
     except Exception as e:
         print(f"TTS Error: {str(e)}")
         error = ERROR_CODES["TTS_GENERATION_ERROR"]
