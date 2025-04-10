@@ -180,7 +180,8 @@ api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 # For demo purposes, we're using a dictionary
 API_KEYS = {
     "sk-1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t": {"user": "user1", "rate_limit": 100},
-    "sk-2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u": {"user": "user2", "rate_limit": 50}
+    "sk-2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u": {"user": "user2", "rate_limit": 50},
+    "sk-internal5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t": {"user": "internal-service", "rate_limit": -1}  # -1 indicates unlimited
 }
 
 # Update the ERROR_CODES dictionary to use errcode instead of code
@@ -348,7 +349,7 @@ async def generate_audio_http(
         error = ERROR_CODES["TTS_GENERATION_ERROR"]
         return {"errcode": error["errcode"], "message": error["message"], "details": str(e)}
 
-# Update the get_usage endpoint to handle the API key more explicitly
+# Update the usage endpoint to reflect unlimited usage for special keys
 @app.get("/usage")
 async def get_usage(api_key: str = Depends(get_api_key)):
     # Check one more time if the API key is valid (for extra safety)
@@ -361,12 +362,19 @@ async def get_usage(api_key: str = Depends(get_api_key)):
     
     # If we get here, the API key is valid
     success = ERROR_CODES["SUCCESS"]
+    
+    user_info = API_KEYS[api_key]
+    rate_limit_value = user_info["rate_limit"]
+    
+    # Format the rate limit display
+    rate_limit_display = "Unlimited" if rate_limit_value == -1 else rate_limit_value
+    
     return {
         "errcode": success["errcode"],
         "message": success["message"],
         "data": {
-            "user": API_KEYS[api_key]["user"],
-            "rate_limit": API_KEYS[api_key]["rate_limit"],
+            "user": user_info["user"],
+            "rate_limit": rate_limit_display,
             "usage": {
                 "requests_this_month": 42,  # Example value
                 "tokens_this_month": 1250   # Example value
