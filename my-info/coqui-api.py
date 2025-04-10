@@ -179,8 +179,8 @@ api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 # In a real application, you would store these in a database
 # For demo purposes, we're using a dictionary
 API_KEYS = {
-    "your-test-api-key-1": {"user": "user1", "rate_limit": 100},
-    "your-test-api-key-2": {"user": "user2", "rate_limit": 50}
+    "sk-1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t": {"user": "user1", "rate_limit": 100},
+    "sk-2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u": {"user": "user2", "rate_limit": 50}
 }
 
 # Update the ERROR_CODES dictionary to use errcode instead of code
