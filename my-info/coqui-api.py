@@ -5,7 +5,7 @@ from TTS.api import TTS
 import gradio as gr
 import os
 import urllib.request
-from fastapi import FastAPI, WebSocket, Query, Body
+from fastapi import FastAPI, WebSocket, Query, Body, Depends, Header, HTTPException, Security
 import uvicorn
 from typing import Optional
 from fastapi.responses import FileResponse
@@ -20,6 +20,7 @@ from TTS.utils.generic_utils import get_user_data_dir
 from TTS.utils.manage import ModelManager
 import warnings
 from pydantic import BaseModel
+from fastapi.security.api_key import APIKeyHeader, APIKey
 
 
 os.environ["TTS_HOME"] = "/app/coqui-tts"
@@ -169,14 +170,55 @@ async def generate_audio_ws(text: str) -> bytes:
         print(f"Error in audio generation: {e}")
         raise
 
+# API key configuration
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
+
+# In a real application, you would store these in a database
+# For demo purposes, we're using a dictionary
+API_KEYS = {
+    "your-test-api-key-1": {"user": "user1", "rate_limit": 100},
+    "your-test-api-key-2": {"user": "user2", "rate_limit": 50}
+}
+
+async def get_api_key(api_key_header: str = Security(api_key_header)):
+    if api_key_header in API_KEYS:
+        return api_key_header
+    raise HTTPException(
+        status_code=403, 
+        detail="Invalid or missing API Key"
+    )
+
 @app.websocket("/tts-stream")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, api_key: str = Query(None)):
+    print(f"WebSocket connection attempt with API key: {api_key}")
+    
     await websocket.accept()
     try:
+        # TEMPORARY: Print full request details for debugging
+        print(f"WebSocket scope: {websocket.scope}")
+        
+        # TEMPORARY: Accept connections without valid API key for testing
+        # In production, uncomment the validation below
+        """
+        # Check if the API key is valid
+        if not api_key or api_key not in API_KEYS:
+            print(f"Invalid API key: {api_key}")
+            await websocket.send_json({"error": "Invalid or missing API Key"})
+            await websocket.close(1008)
+            return
+        """
+        
+        # For testing, assume first API key
+        test_api_key = list(API_KEYS.keys())[0]
+        print(f"Using test API key for user: {API_KEYS[test_api_key]['user']}")
+        
         while True:
             text = await websocket.receive_text()
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
+            
+            print(f"Processing text: {text}")
             
             try:
                 async for audio_chunk in generate_audio_ws(text):
@@ -201,8 +243,14 @@ class TTSRequest(BaseModel):
     text: str
 
 @app.post("/tts")
-async def generate_audio_http(request: TTSRequest):
+async def generate_audio_http(
+    request: TTSRequest,
+    api_key: APIKey = Depends(get_api_key)
+):
     try:
+        # Log usage for the API key (in a real app, store this in a database)
+        print(f"API request from user: {API_KEYS[api_key]['user']}")
+        
         text = request.text
         if text.startswith('[') and text.endswith(']'):
             text = text.strip('[]').strip('"\'')
@@ -238,6 +286,19 @@ async def generate_audio_http(request: TTSRequest):
     except Exception as e:
         print(f"TTS Error: {str(e)}")
         return {"error": str(e)}
+
+# Add an endpoint to get API usage information
+@app.get("/usage")
+async def get_usage(api_key: APIKey = Depends(get_api_key)):
+    # In a real application, you would retrieve actual usage data
+    return {
+        "user": API_KEYS[api_key]["user"],
+        "rate_limit": API_KEYS[api_key]["rate_limit"],
+        "usage": {
+            "requests_this_month": 42,  # Example value
+            "tokens_this_month": 1250   # Example value
+        }
+    }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9002)
