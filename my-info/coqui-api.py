@@ -180,8 +180,8 @@ api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
 # For demo purposes, we're using a dictionary
 API_KEYS = {
     "sk-1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t": {"user": "user1", "rate_limit": 100},
-    "sk-2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t1u": {"user": "user2", "rate_limit": 50},
-    "sk-internal5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t": {"user": "internal-service", "rate_limit": -1}  # -1 indicates unlimited
+    "sk-3f4g5h6i7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y": {"user": "user2", "rate_limit": 50},
+    "sk-5z6y7x8w9v0u1t2s3r4q5p6o7n8m9l0k1j2i3h4g": {"user": "internal-service", "rate_limit": -1}  # -1 indicates unlimited
 }
 
 # Update the ERROR_CODES dictionary to use errcode instead of code
