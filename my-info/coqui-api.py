@@ -8,7 +8,7 @@ import urllib.request
 from fastapi import FastAPI, WebSocket, Query, Body, Depends, Header, HTTPException, Security
 import uvicorn
 from typing import Optional
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import time
 import io
 import scipy.io.wavfile as wavfile
@@ -21,6 +21,8 @@ from TTS.utils.manage import ModelManager
 import warnings
 from pydantic import BaseModel
 from fastapi.security.api_key import APIKeyHeader, APIKey
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 os.environ["TTS_HOME"] = "/app/coqui-tts"
@@ -181,12 +183,57 @@ API_KEYS = {
     "your-test-api-key-2": {"user": "user2", "rate_limit": 50}
 }
 
+# Update the ERROR_CODES dictionary to use errcode instead of code
+ERROR_CODES = {
+    "SUCCESS": {"errcode": 0, "message": "Success"},
+    "INVALID_API_KEY": {"errcode": 1001, "message": "Invalid or missing API Key"},
+    "REFERENCE_AUDIO_NOT_FOUND": {"errcode": 2001, "message": "Reference audio file not found"},
+    "TTS_GENERATION_ERROR": {"errcode": 3001, "message": "Error generating audio"},
+    "WEBSOCKET_ERROR": {"errcode": 4001, "message": "WebSocket connection error"},
+    "RATE_LIMIT_EXCEEDED": {"errcode": 5001, "message": "Rate limit exceeded"}
+}
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request, exc):
+    if hasattr(exc, "detail") and isinstance(exc.detail, dict) and "errcode" in exc.detail and "message" in exc.detail:
+        # If our custom format is already in the detail, use it directly
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=exc.detail
+        )
+    else:
+        # For other exceptions, use a generic error
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "errcode": 5000,
+                "message": str(exc.detail)
+            }
+        )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "errcode": 4000,
+            "message": "Validation error",
+            "details": str(exc)
+        }
+    )
+
 async def get_api_key(api_key_header: str = Security(api_key_header)):
     if api_key_header in API_KEYS:
         return api_key_header
-    raise HTTPException(
-        status_code=403, 
-        detail="Invalid or missing API Key"
+    
+    error = ERROR_CODES["INVALID_API_KEY"]
+    # Instead of using HTTPException, return a JSONResponse directly
+    return JSONResponse(
+        status_code=403,
+        content={
+            "errcode": error["errcode"],
+            "message": error["message"]
+        }
     )
 
 @app.websocket("/tts-stream")
@@ -211,7 +258,8 @@ async def websocket_endpoint(websocket: WebSocket):
         # Check if the API key is valid
         if not api_key or api_key not in API_KEYS:
             print(f"Invalid API key: {api_key}")
-            await websocket.send_json({"error": "Invalid or missing API Key"})
+            error = ERROR_CODES["INVALID_API_KEY"]
+            await websocket.send_json({"errcode": error["errcode"], "message": error["message"]})
             await websocket.close(1008)  # Policy violation close code
             return
             
@@ -232,12 +280,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_bytes(b'')
             except Exception as e:
                 print(f"Error generating audio: {e}")
-                await websocket.send_json({"error": str(e)})
+                error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                await websocket.send_json({"errcode": error["errcode"], "message": error["message"], "details": str(e)})
     except WebSocketDisconnect:
         print("Client disconnected")
     except Exception as e:
         print(f"WebSocket error: {e}")
         try:
+            error = ERROR_CODES["WEBSOCKET_ERROR"]
+            await websocket.send_json({"errcode": error["errcode"], "message": error["message"], "details": str(e)})
             await websocket.close()
         except:
             pass
@@ -270,7 +321,8 @@ async def generate_audio_http(
             print(f"Using XTTS model with language: {language}")
             
             if not os.path.exists(sample_wav_path):
-                return {"error": "Reference audio file not found"}
+                error = ERROR_CODES["REFERENCE_AUDIO_NOT_FOUND"]
+                return {"errcode": error["errcode"], "message": error["message"]}
                 
             global_chinese_tts.tts_to_file(
                 text=text,
@@ -282,6 +334,7 @@ async def generate_audio_http(
             print("Using FastPitch model")
             global_tts.tts_to_file(text=text, file_path=output_path)
         
+        # For file responses, we can't add errcode/message, so we keep this as is
         return FileResponse(
             output_path,
             media_type="audio/wav",
@@ -289,18 +342,24 @@ async def generate_audio_http(
         )
     except Exception as e:
         print(f"TTS Error: {str(e)}")
-        return {"error": str(e)}
+        error = ERROR_CODES["TTS_GENERATION_ERROR"]
+        return {"errcode": error["errcode"], "message": error["message"], "details": str(e)}
 
-# Add an endpoint to get API usage information
+# Update the usage endpoint to use the standardized format
 @app.get("/usage")
 async def get_usage(api_key: APIKey = Depends(get_api_key)):
     # In a real application, you would retrieve actual usage data
+    success = ERROR_CODES["SUCCESS"]
     return {
-        "user": API_KEYS[api_key]["user"],
-        "rate_limit": API_KEYS[api_key]["rate_limit"],
-        "usage": {
-            "requests_this_month": 42,  # Example value
-            "tokens_this_month": 1250   # Example value
+        "errcode": success["errcode"],
+        "message": success["message"],
+        "data": {
+            "user": API_KEYS[api_key]["user"],
+            "rate_limit": API_KEYS[api_key]["rate_limit"],
+            "usage": {
+                "requests_this_month": 42,  # Example value
+                "tokens_this_month": 1250   # Example value
+            }
         }
     }
 
