@@ -199,7 +199,7 @@ async def http_exception_handler(request, exc):
         # If our custom format is already in the detail, use it directly
         return JSONResponse(
             status_code=exc.status_code,
-            content=exc.detail
+            content=exc.detail  # This will have errcode and message at the top level
         )
     else:
         # For other exceptions, use a generic error
@@ -227,10 +227,10 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
         return api_key_header
     
     error = ERROR_CODES["INVALID_API_KEY"]
-    # Instead of using HTTPException, return a JSONResponse directly
-    return JSONResponse(
-        status_code=403,
-        content={
+    # Use HTTPException with our standard format
+    raise HTTPException(
+        status_code=403, 
+        detail={
             "errcode": error["errcode"],
             "message": error["message"]
         }
