@@ -223,17 +223,20 @@ async def validation_exception_handler(request, exc):
     )
 
 async def get_api_key(api_key_header: str = Security(api_key_header)):
+    if not api_key_header:
+        error = ERROR_CODES["INVALID_API_KEY"]
+        raise HTTPException(
+            status_code=403,
+            detail={"errcode": error["errcode"], "message": error["message"]}
+        )
+    
     if api_key_header in API_KEYS:
         return api_key_header
     
     error = ERROR_CODES["INVALID_API_KEY"]
-    # Use HTTPException with our standard format
     raise HTTPException(
-        status_code=403, 
-        detail={
-            "errcode": error["errcode"],
-            "message": error["message"]
-        }
+        status_code=403,
+        detail={"errcode": error["errcode"], "message": error["message"]}
     )
 
 @app.websocket("/tts-stream")
@@ -345,10 +348,18 @@ async def generate_audio_http(
         error = ERROR_CODES["TTS_GENERATION_ERROR"]
         return {"errcode": error["errcode"], "message": error["message"], "details": str(e)}
 
-# Update the usage endpoint to use the standardized format
+# Update the get_usage endpoint to handle the API key more explicitly
 @app.get("/usage")
-async def get_usage(api_key: APIKey = Depends(get_api_key)):
-    # In a real application, you would retrieve actual usage data
+async def get_usage(api_key: str = Depends(get_api_key)):
+    # Check one more time if the API key is valid (for extra safety)
+    if api_key not in API_KEYS:
+        error = ERROR_CODES["INVALID_API_KEY"]
+        return JSONResponse(
+            status_code=403,
+            content={"errcode": error["errcode"], "message": error["message"]}
+        )
+    
+    # If we get here, the API key is valid
     success = ERROR_CODES["SUCCESS"]
     return {
         "errcode": success["errcode"],
