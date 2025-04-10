@@ -382,7 +382,7 @@ async def get_usage(api_key: str = Depends(get_api_key)):
         }
     }
 
-# Add a new streaming HTTP endpoint
+# Add a new streaming HTTP endpoint with proper WAV formatting
 @app.post("/tts-stream-http")
 async def generate_audio_http_stream(
     request: TTSRequest,
@@ -398,19 +398,45 @@ async def generate_audio_http_stream(
             
         print(f"Processing text: {text} using HTTP streaming")
         
-        # Define an async generator for streaming audio chunks
-        async def audio_stream_generator():
+        # Create a function to properly format WAV stream
+        async def wav_stream_generator():
             try:
-                async for audio_chunk in generate_audio_ws(text):
-                    yield audio_chunk
+                # Choose model based on text content
+                if has_chinese(text):
+                    # Use XTTS v2 for Chinese text
+                    with torch.inference_mode():
+                        wav = global_chinese_tts.tts(
+                            text=text,
+                            speaker_wav=sample_wav_path,
+                            language="zh"
+                        )
+                else:
+                    # Use FastPitch for English text
+                    with torch.inference_mode():
+                        wav = global_tts.tts(text=text)
+                
+                # Normalize and convert to 16-bit PCM
+                wav = np.clip(wav, -1, 1)
+                wav = (wav * 32767).astype(np.int16)
+                
+                # Create WAV file in memory
+                buffer = io.BytesIO()
+                wavfile.write(buffer, 22050, wav)  # Sample rate is 22050 Hz
+                buffer.seek(0)
+                
+                # Read and yield chunks
+                chunk = buffer.read(4096)  # Read larger chunks for better streaming
+                while chunk:
+                    yield chunk
+                    chunk = buffer.read(4096)
+                    
             except Exception as e:
                 print(f"Error streaming audio: {e}")
-                # We can't return JSON error in a streaming response once it's started,
-                # so we log the error but the client will receive a truncated stream
+                raise
                 
-        # Return a streaming response with the audio
+        # Return a streaming response with the WAV file
         return StreamingResponse(
-            audio_stream_generator(), 
+            wav_stream_generator(), 
             media_type="audio/wav",
             headers={
                 "Content-Disposition": f"attachment; filename=tts_output_{int(time.time())}.wav"
