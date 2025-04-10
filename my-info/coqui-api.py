@@ -190,28 +190,32 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
     )
 
 @app.websocket("/tts-stream")
-async def websocket_endpoint(websocket: WebSocket, api_key: str = Query(None)):
-    print(f"WebSocket connection attempt with API key: {api_key}")
+async def websocket_endpoint(websocket: WebSocket):
+    print("WebSocket connection attempt")
     
     await websocket.accept()
     try:
-        # TEMPORARY: Print full request details for debugging
-        print(f"WebSocket scope: {websocket.scope}")
+        # Extract API key from headers
+        headers = dict(websocket.headers)
+        print(f"WebSocket headers received: {headers}")
         
-        # TEMPORARY: Accept connections without valid API key for testing
-        # In production, uncomment the validation below
-        """
+        # Find API key in headers (case-insensitive)
+        api_key = None
+        for key, value in headers.items():
+            if key.lower() == API_KEY_NAME.lower():
+                api_key = value
+                break
+                
+        print(f"API key extracted from headers: {api_key}")
+        
         # Check if the API key is valid
         if not api_key or api_key not in API_KEYS:
             print(f"Invalid API key: {api_key}")
             await websocket.send_json({"error": "Invalid or missing API Key"})
-            await websocket.close(1008)
+            await websocket.close(1008)  # Policy violation close code
             return
-        """
-        
-        # For testing, assume first API key
-        test_api_key = list(API_KEYS.keys())[0]
-        print(f"Using test API key for user: {API_KEYS[test_api_key]['user']}")
+            
+        print(f"Valid API key from user: {API_KEYS[api_key]['user']}")
         
         while True:
             text = await websocket.receive_text()
