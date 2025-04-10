@@ -8,7 +8,7 @@ import urllib.request
 from fastapi import FastAPI, WebSocket, Query, Body, Depends, Header, HTTPException, Security
 import uvicorn
 from typing import Optional
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 import time
 import io
 import scipy.io.wavfile as wavfile
@@ -381,6 +381,52 @@ async def get_usage(api_key: str = Depends(get_api_key)):
             }
         }
     }
+
+# Add a new streaming HTTP endpoint
+@app.post("/tts-stream-http")
+async def generate_audio_http_stream(
+    request: TTSRequest,
+    api_key: APIKey = Depends(get_api_key)
+):
+    try:
+        # Log usage for the API key (in a real app, store this in a database)
+        print(f"API request from user: {API_KEYS[api_key]['user']}")
+        
+        text = request.text
+        if text.startswith('[') and text.endswith(']'):
+            text = text.strip('[]').strip('"\'')
+            
+        print(f"Processing text: {text} using HTTP streaming")
+        
+        # Define an async generator for streaming audio chunks
+        async def audio_stream_generator():
+            try:
+                async for audio_chunk in generate_audio_ws(text):
+                    yield audio_chunk
+            except Exception as e:
+                print(f"Error streaming audio: {e}")
+                # We can't return JSON error in a streaming response once it's started,
+                # so we log the error but the client will receive a truncated stream
+                
+        # Return a streaming response with the audio
+        return StreamingResponse(
+            audio_stream_generator(), 
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": f"attachment; filename=tts_output_{int(time.time())}.wav"
+            }
+        )
+    except Exception as e:
+        print(f"TTS Error: {str(e)}")
+        error = ERROR_CODES["TTS_GENERATION_ERROR"]
+        return JSONResponse(
+            status_code=500,
+            content={
+                "errorCode": error["errorCode"], 
+                "message": error["message"], 
+                "details": str(e)
+            }
+        )
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9002)
