@@ -53,14 +53,14 @@ print('=== speakers ===')
 # tts.tts_to_file(text="The sun sets behind the mountains, casting long shadows across the valley.", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="en", file_path="output.wav")
 
 # (work)Jack Ma(zh)
-# tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh", file_path="output.wav")
+tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh", file_path="output.wav")
 
 # (work)Jack Ma(zh-cn)
 # tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh-cn", file_path="output.wav")
 
 # (work)Jack Ma(ja)
 # [install]:  pip install cutlet
-tts.tts_to_file(text="彼は午後、窓際の心地よい肘掛け椅子に座って、面白い小説を夢中で読んでいた。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="ja", file_path="output.wav")
+# tts.tts_to_file(text="彼は午後、窓際の心地よい肘掛け椅子に座って、面白い小説を夢中で読んでいた。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="ja", file_path="output.wav")
 
 
 # ==== Example: (work)Use Chinese model(tacotron2-DDC-GST) ====
