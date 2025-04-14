@@ -411,20 +411,49 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 
                 # Generate the audio data
-                if language == "en":
-                    # Use FastPitch for English text
-                    with torch.inference_mode():
-                        wav = global_tts.tts(text=text)
-                        wav = ensure_numpy_array(wav)
-                else:
-                    # Use XTTS v2 for other supported languages
-                    with torch.inference_mode():
-                        wav = global_chinese_tts.tts(
+                try:
+                    if language == "en":
+                        # Use FastPitch for English text
+                        with torch.inference_mode():
+                            wav_result = global_tts.tts(text=text)
+                    else:
+                        # Use XTTS v2 for other supported languages
+                        with torch.inference_mode():
+                            wav_result = global_chinese_tts.tts(
+                                text=text,
+                                speaker_wav=sample_wav_path,
+                                language=language
+                            )
+                    
+                    # Print debug info about the result
+                    print(f"TTS result type: {type(wav_result)}")
+                    if hasattr(wav_result, 'shape'):
+                        print(f"TTS result shape: {wav_result.shape}")
+                    
+                    # Ensure wav is a properly formatted numpy array
+                    wav = ensure_numpy_array(wav_result)
+                    print(f"After ensure_numpy_array - type: {type(wav)}, shape: {wav.shape if hasattr(wav, 'shape') else 'no shape'}")
+                    
+                except Exception as tts_err:
+                    print(f"Error in TTS generation: {tts_err}")
+                    # Use tts_to_file as a fallback if direct TTS fails
+                    timestamp = int(time.time())
+                    fallback_wav_path = f"outputs/fallback_{timestamp}.wav"
+                    
+                    if language == "en":
+                        global_tts.tts_to_file(text=text, file_path=fallback_wav_path)
+                    else:
+                        global_chinese_tts.tts_to_file(
                             text=text,
+                            file_path=fallback_wav_path,
                             speaker_wav=sample_wav_path,
                             language=language
                         )
-                        wav = ensure_numpy_array(wav)
+                    
+                    # Load the wav file
+                    sample_rate, wav = wavfile.read(fallback_wav_path)
+                    # Convert to float in range [-1, 1]
+                    wav = wav.astype(np.float32) / 32767.0
                 
                 # Save the audio in the background
                 timestamp = int(time.time())
@@ -439,6 +468,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Normalize and convert to 16-bit PCM
                 wav = np.clip(wav, -1, 1)
                 wav = (wav * 32767).astype(np.int16)
+                
+                # Debug the final wav array
+                print(f"Final wav type: {type(wav)}, shape: {wav.shape if hasattr(wav, 'shape') else 'no shape'}")
+                
+                # Make sure wav is a 1D array
+                if not isinstance(wav, np.ndarray) or wav.ndim == 0:
+                    print("Converting scalar to 1D array")
+                    wav = np.array([wav.item() if hasattr(wav, 'item') else float(wav)], dtype=np.int16)
                 
                 # Define chunk size (in samples)
                 chunk_size = 1024
@@ -487,7 +524,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     )
                     
                     # Send the entire PCM data to ffmpeg
-                    opus_data, _ = process.communicate(input=wav.tobytes())
+                    opus_data, stderr = process.communicate(input=wav.tobytes())
+                    
+                    if process.returncode != 0:
+                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                        error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                        await websocket.send_json({
+                            "errorCode": error["errorCode"], 
+                            "message": f"{error['message']}: FFmpeg encoding failed"
+                        })
+                        continue
                     
                     # Stream the opus data in chunks
                     opus_chunk_size = 1024  # Bytes per chunk
@@ -659,22 +705,33 @@ async def generate_audio_http(
         error = ERROR_CODES["TTS_GENERATION_ERROR"]
         return {"errorCode": error["errorCode"], "message": error["message"], "details": str(e)}
 
-# Update the ensure_numpy_array function to handle the zero-dimensional array case
+# Update the ensure_numpy_array function to handle numpy.int16 and other scalar types
 def ensure_numpy_array(audio_array):
+    # Handle numpy scalar types (like numpy.int16)
+    if isinstance(audio_array, np.number):
+        return np.array([float(audio_array)])
+    
+    # Handle integer or scalar value case
+    if isinstance(audio_array, (int, float)) or (isinstance(audio_array, np.ndarray) and audio_array.shape == ()):
+        return np.array([float(audio_array)])
+    
     if isinstance(audio_array, list):
         if len(audio_array) == 0:  # Empty list
             return np.array([])
         elif len(audio_array) == 1:
+            # If the single element is a scalar, convert it properly
+            if isinstance(audio_array[0], (int, float, np.number)):
+                return np.array([float(audio_array[0])])
             return audio_array[0]
         else:
-            # Check if any array is zero-dimensional
+            # Check if any array is zero-dimensional or scalar
             for i, arr in enumerate(audio_array):
-                if not arr.shape or arr.size == 0:
-                    # Skip zero-dimensional arrays
-                    audio_array[i] = np.array([])
+                if isinstance(arr, (int, float, np.number)) or (isinstance(arr, np.ndarray) and (not arr.shape or arr.size == 0)):
+                    # Convert scalar/zero-dimensional arrays to 1D arrays
+                    audio_array[i] = np.array([float(arr)]) if isinstance(arr, (int, float, np.number)) else np.array([])
             
             # Filter out empty arrays
-            non_empty_arrays = [arr for arr in audio_array if arr.size > 0]
+            non_empty_arrays = [arr for arr in audio_array if hasattr(arr, 'size') and arr.size > 0]
             
             if not non_empty_arrays:
                 return np.array([])
@@ -683,15 +740,49 @@ def ensure_numpy_array(audio_array):
             else:
                 try:
                     return np.concatenate(non_empty_arrays)
-                except ValueError:
-                    # If concatenation still fails, return the first non-empty array
-                    print("Warning: Could not concatenate arrays, returning first array")
+                except ValueError as e:
+                    # If concatenation fails, return the first non-empty array
+                    print(f"Warning: Could not concatenate arrays: {e}, returning first array")
                     return non_empty_arrays[0]
+    
+    # If audio_array is not a numpy array or doesn't have shape attribute
+    if not isinstance(audio_array, np.ndarray):
+        try:
+            # Try to convert to numpy array
+            return np.array(audio_array, dtype=float)
+        except Exception as e:
+            print(f"Error converting to numpy array: {e}")
+            # Return a default empty audio array as fallback
+            return np.array([0.0], dtype=float)
+    
     return audio_array
 
 # Helper function to save audio files in the background
 async def save_audio_file_background(wav_array, wav_path, opus_path, audio_format):
     try:
+        print(f"Saving audio to {wav_path}, type: {type(wav_array)}")
+        
+        # Handle scalar numpy types
+        if isinstance(wav_array, np.number):
+            wav_array = np.array([float(wav_array)])
+        
+        # Ensure wav_array is a numpy array
+        if not isinstance(wav_array, np.ndarray):
+            if isinstance(wav_array, (list, tuple)):
+                wav_array = np.array(wav_array, dtype=float)
+            else:
+                wav_array = np.array([float(wav_array)])
+        
+        # Ensure it's a 1D array
+        if wav_array.ndim == 0:
+            wav_array = np.array([wav_array.item()], dtype=float)
+        
+        # Normalize and convert to 16-bit PCM for saving
+        wav_array = np.clip(wav_array, -1, 1)
+        wav_array = (wav_array * 32767).astype(np.int16)
+        
+        print(f"Saving wav array shape: {wav_array.shape}")
+        
         # Save WAV file
         sample_rate = 22050
         wavfile.write(wav_path, sample_rate, wav_array)
@@ -751,6 +842,37 @@ async def generate_audio_http_stream(
                 content={"errorCode": error["errorCode"], "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"}
             )
         
+        # As a failsafe, generate the wav file first and read it back
+        timestamp = int(time.time())
+        wav_path = f"outputs/output_{timestamp}.wav"
+        opus_path = f"outputs/output_{timestamp}.opus"
+        
+        try:
+            # Generate wav file first to avoid array handling issues
+            if language == "en":
+                global_tts.tts_to_file(text=text, file_path=wav_path)
+            else:
+                global_chinese_tts.tts_to_file(
+                    text=text,
+                    file_path=wav_path,
+                    speaker_wav=sample_wav_path,
+                    language=language
+                )
+            
+            # Read the wav file
+            sample_rate, wav_array = wavfile.read(wav_path)
+            wav_array = wav_array.astype(np.float32) / 32767.0  # Convert to float [-1,1]
+        except Exception as e:
+            print(f"Error in tts_to_file: {e}")
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "errorCode": ERROR_CODES["TTS_GENERATION_ERROR"]["errorCode"],
+                    "message": ERROR_CODES["TTS_GENERATION_ERROR"]["message"],
+                    "details": str(e)
+                }
+            )
+        
         # Binary stream generator for WAV format
         async def wav_stream_generator():
             # Create WAV header first
@@ -786,35 +908,16 @@ async def generate_audio_http_stream(
             # Buffer to collect audio data for size calculations
             data_buffer = bytearray()
             
-            # Generate audio
-            if language == "en":
-                # Use FastPitch for English text
-                with torch.inference_mode():
-                    wav = global_tts.tts(text=text)
-                    wav = ensure_numpy_array(wav)
-            else:
-                # Use XTTS v2 for other supported languages
-                with torch.inference_mode():
-                    wav = global_chinese_tts.tts(
-                        text=text,
-                        speaker_wav=sample_wav_path,
-                        language=language
-                    )
-                    wav = ensure_numpy_array(wav)
-            
-            # Save the audio in the background
-            timestamp = int(time.time())
-            wav_path = f"outputs/output_{timestamp}.wav"
-            opus_path = f"outputs/output_{timestamp}.opus"
-            
-            # Start a task to save the file in the background
-            asyncio.create_task(
-                save_audio_file_background(wav, wav_path, opus_path, audio_format)
-            )
+            # We already have the wav_array from the file
+            wav = wav_array
             
             # Normalize and convert to 16-bit PCM
             wav = np.clip(wav, -1, 1)
             wav = (wav * 32767).astype(np.int16)
+            
+            # Make sure wav is a 1D array
+            if wav.ndim == 0:
+                wav = np.array([wav.item()], dtype=np.int16)
             
             # Stream audio chunks
             chunk_size = 1024  # Samples per chunk
@@ -854,58 +957,22 @@ async def generate_audio_http_stream(
         
         # Binary stream generator for Opus format
         async def opus_stream_generator():
-            # Generate audio
-            if language == "en":
-                # Use FastPitch for English text
-                with torch.inference_mode():
-                    wav = global_tts.tts(text=text)
-                    wav = ensure_numpy_array(wav)
-            else:
-                # Use XTTS v2 for other supported languages
-                with torch.inference_mode():
-                    wav = global_chinese_tts.tts(
-                        text=text,
-                        speaker_wav=sample_wav_path,
-                        language=language
-                    )
-                    wav = ensure_numpy_array(wav)
+            # We already have the wav file, so convert to opus
             
-            # Save the audio in the background
-            timestamp = int(time.time())
-            wav_path = f"outputs/output_{timestamp}.wav"
-            opus_path = f"outputs/output_{timestamp}.opus"
+            if not os.path.exists(wav_path):
+                error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                raise Exception(f"{error['message']}: WAV file not found")
             
-            # Start a task to save the file in the background
-            asyncio.create_task(
-                save_audio_file_background(wav, wav_path, opus_path, audio_format)
-            )
+            # Convert the WAV file to Opus
+            convert_wav_to_opus(wav_path, opus_path)
             
-            # Normalize and convert to 16-bit PCM
-            wav = np.clip(wav, -1, 1)
-            wav = (wav * 32767).astype(np.int16)
+            if not os.path.exists(opus_path):
+                error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                raise Exception(f"{error['message']}: Opus conversion failed")
             
-            # Create a subprocess for FFmpeg
-            process = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-f", "s16le",      # 16-bit PCM input
-                    "-ar", "22050",     # Sample rate
-                    "-ac", "1",         # Mono
-                    "-i", "pipe:0",     # Read from stdin
-                    "-c:a", "libopus",
-                    "-b:a", "32k",
-                    "-application", "voip",
-                    "-vbr", "on",
-                    "-f", "opus",
-                    "pipe:1"            # Output to stdout
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            
-            # Send the entire PCM data to ffmpeg
-            opus_data, _ = process.communicate(input=wav.tobytes())
+            # Read the opus file and stream it in chunks
+            with open(opus_path, 'rb') as opus_file:
+                opus_data = opus_file.read()
             
             # Stream the opus data in chunks
             opus_chunk_size = 1024  # Bytes per chunk
