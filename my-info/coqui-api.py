@@ -121,23 +121,73 @@ def has_chinese(text):
     """Check if the text contains Chinese characters"""
     return any('\u4e00' <= char <= '\u9fff' for char in text)
 
-async def generate_audio_ws(text: str) -> bytes:
+# Add this right after the ERROR_CODES dictionary
+ERROR_CODES = {
+    "SUCCESS": {"errorCode": 0, "message": "Success"},
+    "INVALID_API_KEY": {"errorCode": 1001, "message": "Invalid or missing API Key"},
+    "REFERENCE_AUDIO_NOT_FOUND": {"errorCode": 2001, "message": "Reference audio file not found"},
+    "TTS_GENERATION_ERROR": {"errorCode": 3001, "message": "Error generating audio"},
+    "WEBSOCKET_ERROR": {"errorCode": 4001, "message": "WebSocket connection error"},
+    "RATE_LIMIT_EXCEEDED": {"errorCode": 5001, "message": "Rate limit exceeded"},
+    "UNSUPPORTED_LANGUAGE": {"errorCode": 6001, "message": "Unsupported language"}
+}
+
+# Load supported languages
+SUPPORTED_LANGUAGES = {}
+try:
+    with open("my-info/coqui-language/xtts_v2_supported_language.md", "r") as f:
+        for line in f:
+            if ":" in line:
+                code, name = line.strip().split(":", 1)
+                SUPPORTED_LANGUAGES[code.strip()] = name.strip()
+except Exception as e:
+    print(f"Error loading supported languages: {e}")
+    # Fallback to the complete list of languages from xtts_v2_supported_language.md
+    SUPPORTED_LANGUAGES = {
+        "en": "English",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+        "it": "Italian",
+        "pt": "Portuguese",
+        "pl": "Polish",
+        "tr": "Turkish",
+        "ru": "Russian",
+        "nl": "Dutch",
+        "cs": "Czech",
+        "ar": "Arabic",
+        "zh-cn": "Chinese (Simplified)",
+        "hu": "Hungarian",
+        "ko": "Korean",
+        "ja": "Japanese",
+        "hi": "Hindi"
+    }
+
+print(f"Supported languages loaded: {SUPPORTED_LANGUAGES}")
+
+async def generate_audio_ws(text: str, language: str = "en") -> bytes:
     try:
         start_time = time.time()
         
-        # Choose model based on text content
-        if has_chinese(text):
-            # Use XTTS v2 for Chinese text
+        # Validate language
+        language = language.lower() if language else "en"
+        if language != "en" and language not in SUPPORTED_LANGUAGES:
+            error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
+            raise ValueError(f"{error['message']}: {language}")
+        
+        # Choose model based on language
+        if language == "en":
+            # Use FastPitch for English text
+            with torch.inference_mode():
+                wav = global_tts.tts(text=text)
+        else:
+            # Use XTTS v2 for other supported languages
             with torch.inference_mode():
                 wav = global_chinese_tts.tts(
                     text=text,
                     speaker_wav=sample_wav_path,
-                    language="zh"
+                    language=language
                 )
-        else:
-            # Use FastPitch for English text
-            with torch.inference_mode():
-                wav = global_tts.tts(text=text)
 
         # Calculate TTS generation time in milliseconds
         tts_time = (time.time() - start_time) * 1000
@@ -186,16 +236,6 @@ API_KEYS = {
     "sk-1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t": {"user": "user1", "rate_limit": 100},
     "sk-3f4g5h6i7j8k9l0m1n2o3p4q5r6s7t8u9v0w1x2y": {"user": "user2", "rate_limit": 50},
     "sk-5z6y7x8w9v0u1t2s3r4q5p6o7n8m9l0k1j2i3h4g": {"user": "internal-service", "rate_limit": -1}  # -1 indicates unlimited
-}
-
-# Update the ERROR_CODES dictionary
-ERROR_CODES = {
-    "SUCCESS": {"errorCode": 0, "message": "Success"},
-    "INVALID_API_KEY": {"errorCode": 1001, "message": "Invalid or missing API Key"},
-    "REFERENCE_AUDIO_NOT_FOUND": {"errorCode": 2001, "message": "Reference audio file not found"},
-    "TTS_GENERATION_ERROR": {"errorCode": 3001, "message": "Error generating audio"},
-    "WEBSOCKET_ERROR": {"errorCode": 4001, "message": "WebSocket connection error"},
-    "RATE_LIMIT_EXCEEDED": {"errorCode": 5001, "message": "Rate limit exceeded"}
 }
 
 @app.exception_handler(StarletteHTTPException)
@@ -274,14 +314,35 @@ async def websocket_endpoint(websocket: WebSocket):
         print(f"Valid API key from user: {API_KEYS[api_key]['user']}")
         
         while True:
-            text = await websocket.receive_text()
+            # Receive message as JSON
+            data = await websocket.receive_text()
+            try:
+                # Try to parse as JSON
+                message = json.loads(data)
+                text = message.get("text", "")
+                language = message.get("language", "en")
+            except json.JSONDecodeError:
+                # If not JSON, assume it's just text
+                text = data
+                language = "en"
+            
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
             
-            print(f"Processing text: {text}")
+            print(f"Processing text: {text} with language: {language}")
             
             try:
-                async for audio_chunk in generate_audio_ws(text):
+                # Validate language first
+                language = language.lower() if language else "en"
+                if language != "en" and language not in SUPPORTED_LANGUAGES:
+                    error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
+                    await websocket.send_json({
+                        "errorCode": error["errorCode"], 
+                        "message": f"{error['message']}: {language}"
+                    })
+                    continue
+                
+                async for audio_chunk in generate_audio_ws(text, language):
                     if audio_chunk:  # Only send non-empty chunks
                         await websocket.send_bytes(audio_chunk)
                 # Send an empty chunk to signal completion
@@ -301,9 +362,10 @@ async def websocket_endpoint(websocket: WebSocket):
         except:
             pass
 
-# Add this class to define the request body structure
+# Update the TTSRequest model to include language parameter
 class TTSRequest(BaseModel):
     text: str
+    language: Optional[str] = "en"
 
 @app.post("/tts")
 async def generate_audio_http(
@@ -315,17 +377,26 @@ async def generate_audio_http(
         print(f"API request from user: {API_KEYS[api_key]['user']}")
         
         text = request.text
+        language = request.language.lower() if request.language else "en"
+        
         if text.startswith('[') and text.endswith(']'):
             text = text.strip('[]').strip('"\'')
             
-        print(f"Processing text: {text}")
+        print(f"Processing text: {text} with language: {language}")
+        
+        # Validate language
+        if language != "en" and language not in SUPPORTED_LANGUAGES:
+            error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
+            return {"errorCode": error["errorCode"], "message": f"{error['message']}: {language}"}
         
         timestamp = int(time.time())
         output_path = f"outputs/output_{timestamp}.wav"
         
-        # Choose model based on text content
-        if has_chinese(text):
-            language = "zh"
+        # Choose model based on language
+        if language == "en":
+            print("Using FastPitch model for English")
+            global_tts.tts_to_file(text=text, file_path=output_path)
+        else:
             print(f"Using XTTS model with language: {language}")
             
             if not os.path.exists(sample_wav_path):
@@ -338,9 +409,6 @@ async def generate_audio_http(
                 speaker_wav=sample_wav_path,
                 language=language
             )
-        else:
-            print("Using FastPitch model")
-            global_tts.tts_to_file(text=text, file_path=output_path)
         
         # For file responses, we can't add errorCode/message, so we keep this as is
         return FileResponse(
@@ -397,10 +465,20 @@ async def generate_audio_http_stream(
         print(f"API request from user: {API_KEYS[api_key]['user']}")
         
         text = request.text
+        language = request.language.lower() if request.language else "en"
+        
         if text.startswith('[') and text.endswith(']'):
             text = text.strip('[]').strip('"\'')
             
-        print(f"Processing text: {text} using HTTP streaming")
+        print(f"Processing text: {text} with language: {language}")
+        
+        # Validate language
+        if language != "en" and language not in SUPPORTED_LANGUAGES:
+            error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
+            return JSONResponse(
+                status_code=400,
+                content={"errorCode": error["errorCode"], "message": f"{error['message']}: {language}"}
+            )
         
         # Create efficient binary stream generator
         async def binary_stream_generator():
@@ -438,7 +516,7 @@ async def generate_audio_http_stream(
             data_buffer = bytearray()
             
             # Stream audio chunks
-            async for audio_chunk in generate_audio_ws(text):
+            async for audio_chunk in generate_audio_ws(text, language):
                 if audio_chunk:
                     data_buffer.extend(audio_chunk)
                     yield audio_chunk
