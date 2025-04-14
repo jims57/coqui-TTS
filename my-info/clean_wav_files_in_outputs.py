@@ -2,6 +2,7 @@ import os
 import glob
 import time
 from typing import List
+import asyncio
 
 def clean_wav_files(output_dir: str = "outputs", total_wav_numbers: int = 5) -> None:
     """
@@ -40,6 +41,18 @@ def clean_wav_files(output_dir: str = "outputs", total_wav_numbers: int = 5) -> 
             print(f"Error deleting {file_path}: {e}")
     
     print(f"Cleanup complete. Kept the {total_wav_numbers} most recent WAV files.")
+
+async def async_clean_wav_files(output_dir: str = "outputs", total_wav_numbers: int = 5) -> None:
+    """
+    Async version of clean_wav_files that runs the cleanup in a separate thread.
+    
+    Args:
+        output_dir: Directory containing WAV files (default: "outputs")
+        total_wav_numbers: Maximum number of WAV files to keep (default: 5)
+    """
+    # Run the synchronous cleanup function in a thread to avoid blocking
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, lambda: clean_wav_files(output_dir, total_wav_numbers))
 
 if __name__ == "__main__":
     clean_wav_files()

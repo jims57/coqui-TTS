@@ -27,6 +27,8 @@ from sse_starlette.sse import EventSourceResponse
 import json
 import base64
 import struct
+import asyncio
+from clean_wav_files_in_outputs import async_clean_wav_files
 
 
 os.environ["TTS_HOME"] = "/app/coqui-tts"
@@ -403,6 +405,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         await websocket.send_bytes(audio_chunk)
                 # Send an empty chunk to signal completion
                 await websocket.send_bytes(b'')
+                
+                # Schedule WAV cleanup without waiting for it to complete
+                asyncio.create_task(async_clean_wav_files())
+                
             except Exception as e:
                 print(f"Error generating audio: {e}")
                 error = ERROR_CODES["TTS_GENERATION_ERROR"]
@@ -472,6 +478,9 @@ async def generate_audio_http(
                 speaker_wav=sample_wav_path,
                 language=language
             )
+        
+        # Schedule WAV cleanup without waiting for it to complete
+        asyncio.create_task(async_clean_wav_files())
         
         # For file responses, we can't add errorCode/message, so we keep this as is
         return FileResponse(
@@ -616,6 +625,9 @@ async def generate_audio_http_stream(
             
             # Note: We don't send this updated header because 
             # clients have already processed the initial header
+            
+            # Schedule WAV cleanup without waiting for it to complete
+            asyncio.create_task(async_clean_wav_files())
                 
         # Return the streaming response
         return StreamingResponse(
