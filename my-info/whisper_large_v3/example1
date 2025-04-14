@@ -1,0 +1,47 @@
+import torch
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from datasets import load_dataset
+
+
+device = "cuda:0" if torch.cuda.is_available() else "cpu"
+torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+
+model_id = "openai/whisper-large-v3"
+
+model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    model_id, torch_dtype=torch_dtype, low_cpu_mem_usage=True, use_safetensors=True
+)
+model.to(device)
+
+processor = AutoProcessor.from_pretrained(model_id)
+
+pipe = pipeline(
+    "automatic-speech-recognition",
+    model=model,
+    tokenizer=processor.tokenizer,
+    feature_extractor=processor.feature_extractor,
+    torch_dtype=torch_dtype,
+    device=device,
+)
+
+# The code above loads a sample from a dataset for demonstration purposes.
+# If you have your own audio file (e.g., abc.wav), you can load it like this:
+import soundfile as sf
+
+# Load your audio file
+audio_path = "abc.wav"  # Replace with your actual file path
+audio_array, sampling_rate = sf.read(audio_path)
+
+# Create a dictionary similar to what the dataset provides
+sample = {
+    "raw": audio_array,
+    "sampling_rate": sampling_rate
+}
+
+# Alternatively, you can use librosa:
+# import librosa
+# audio_array, sampling_rate = librosa.load("abc.wav", sr=16000)  # 16kHz is common for speech models
+# sample = {"raw": audio_array, "sampling_rate": sampling_rate}
+
+result = pipe(sample)
+print(result["text"])
