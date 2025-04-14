@@ -117,9 +117,41 @@ async def startup_event():
     # Ensure outputs directory exists
     os.makedirs("outputs", exist_ok=True)
 
-def has_chinese(text):
-    """Check if the text contains Chinese characters"""
-    return any('\u4e00' <= char <= '\u9fff' for char in text)
+def detect_language(text):
+    """
+    Detect the likely language of the text based on character ranges.
+    Returns a language code or None if cannot determine.
+    """
+    # Check for language-specific characters
+    
+    # Chinese (Simplified & Traditional)
+    if any('\u4e00' <= char <= '\u9fff' for char in text):
+        return "zh-cn"
+    
+    # Japanese specific characters (Hiragana and Katakana)
+    if any('\u3040' <= char <= '\u30ff' for char in text):
+        return "ja"
+    
+    # Korean (Hangul)
+    if any('\uac00' <= char <= '\ud7a3' for char in text):
+        return "ko"
+    
+    # Arabic
+    if any('\u0600' <= char <= '\u06ff' for char in text):
+        return "ar"
+    
+    # Russian (Cyrillic)
+    if any('\u0400' <= char <= '\u04ff' for char in text):
+        return "ru"
+    
+    # Hindi (Devanagari)
+    if any('\u0900' <= char <= '\u097f' for char in text):
+        return "hi"
+    
+    # For Latin-based languages (en, es, fr, de, it, pt, pl, nl, cs, hu)
+    # we can't easily distinguish just by character range
+    # Return None to indicate we couldn't detect it definitively
+    return None
 
 # Add this right after the ERROR_CODES dictionary
 ERROR_CODES = {
@@ -129,7 +161,8 @@ ERROR_CODES = {
     "TTS_GENERATION_ERROR": {"errorCode": 3001, "message": "Error generating audio"},
     "WEBSOCKET_ERROR": {"errorCode": 4001, "message": "WebSocket connection error"},
     "RATE_LIMIT_EXCEEDED": {"errorCode": 5001, "message": "Rate limit exceeded"},
-    "UNSUPPORTED_LANGUAGE": {"errorCode": 6001, "message": "Unsupported language"}
+    "UNSUPPORTED_LANGUAGE": {"errorCode": 6001, "message": "Unsupported language"},
+    "LANGUAGE_MISMATCH": {"errorCode": 6002, "message": "Text language doesn't match requested language"}
 }
 
 # Load supported languages
@@ -165,6 +198,11 @@ except Exception as e:
 
 print(f"Supported languages loaded: {SUPPORTED_LANGUAGES}")
 
+# Add a function to detect if text is likely Chinese
+def likely_contains_chinese(text):
+    """Check if the text contains Chinese characters"""
+    return any('\u4e00' <= char <= '\u9fff' for char in text)
+
 async def generate_audio_ws(text: str, language: str = "en") -> bytes:
     try:
         start_time = time.time()
@@ -174,6 +212,13 @@ async def generate_audio_ws(text: str, language: str = "en") -> bytes:
         if language != "en" and language not in SUPPORTED_LANGUAGES:
             error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
             raise ValueError(f"{error['message']}: {language}")
+        
+        # Check for language mismatch
+        detected_lang = detect_language(text)
+        if detected_lang and language == "en" and detected_lang != "en":
+            detected_lang_name = SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)
+            error = ERROR_CODES["LANGUAGE_MISMATCH"]
+            raise ValueError(f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English")
         
         # Choose model based on language
         if language == "en":
@@ -342,6 +387,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                     continue
                 
+                # Check for language mismatch
+                detected_lang = detect_language(text)
+                if detected_lang and language == "en" and detected_lang != "en":
+                    detected_lang_name = SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)
+                    error = ERROR_CODES["LANGUAGE_MISMATCH"]
+                    await websocket.send_json({
+                        "errorCode": error["errorCode"], 
+                        "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"
+                    })
+                    continue
+                
                 async for audio_chunk in generate_audio_ws(text, language):
                     if audio_chunk:  # Only send non-empty chunks
                         await websocket.send_bytes(audio_chunk)
@@ -388,6 +444,13 @@ async def generate_audio_http(
         if language != "en" and language not in SUPPORTED_LANGUAGES:
             error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
             return {"errorCode": error["errorCode"], "message": f"{error['message']}: {language}"}
+        
+        # Check for language mismatch
+        detected_lang = detect_language(text)
+        if detected_lang and language == "en" and detected_lang != "en":
+            detected_lang_name = SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)
+            error = ERROR_CODES["LANGUAGE_MISMATCH"]
+            return {"errorCode": error["errorCode"], "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"}
         
         timestamp = int(time.time())
         output_path = f"outputs/output_{timestamp}.wav"
@@ -478,6 +541,16 @@ async def generate_audio_http_stream(
             return JSONResponse(
                 status_code=400,
                 content={"errorCode": error["errorCode"], "message": f"{error['message']}: {language}"}
+            )
+            
+        # Check for language mismatch
+        detected_lang = detect_language(text)
+        if detected_lang and language == "en" and detected_lang != "en":
+            detected_lang_name = SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)
+            error = ERROR_CODES["LANGUAGE_MISMATCH"]
+            return JSONResponse(
+                status_code=400,
+                content={"errorCode": error["errorCode"], "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"}
             )
         
         # Create efficient binary stream generator
