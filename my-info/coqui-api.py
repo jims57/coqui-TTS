@@ -29,6 +29,7 @@ import base64
 import struct
 import asyncio
 from clean_wav_files_in_outputs import async_clean_wav_files
+import subprocess
 
 
 os.environ["TTS_HOME"] = "/app/coqui-tts"
@@ -164,7 +165,8 @@ ERROR_CODES = {
     "WEBSOCKET_ERROR": {"errorCode": 4001, "message": "WebSocket connection error"},
     "RATE_LIMIT_EXCEEDED": {"errorCode": 5001, "message": "Rate limit exceeded"},
     "UNSUPPORTED_LANGUAGE": {"errorCode": 6001, "message": "Unsupported language"},
-    "LANGUAGE_MISMATCH": {"errorCode": 6002, "message": "Text language doesn't match requested language"}
+    "LANGUAGE_MISMATCH": {"errorCode": 6002, "message": "Text language doesn't match requested language"},
+    "INVALID_AUDIO_FORMAT": {"errorCode": 6003, "message": "Invalid audio format. Supported formats: wav, opus"}
 }
 
 # Load supported languages
@@ -368,15 +370,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 message = json.loads(data)
                 text = message.get("text", "")
                 language = message.get("language", "en")
+                audio_format = message.get("audioFormat", "opus").lower()
+                
+                # Validate audio format
+                if audio_format not in ["wav", "opus"]:
+                    error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
+                    await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
+                    continue
             except json.JSONDecodeError:
                 # If not JSON, assume it's just text
                 text = data
                 language = "en"
+                audio_format = "opus"
             
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
             
-            print(f"Processing text: {text} with language: {language}")
+            print(f"Processing text: {text} with language: {language}, format: {audio_format}")
             
             try:
                 # Validate language first
@@ -400,9 +410,91 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                     continue
                 
-                async for audio_chunk in generate_audio_ws(text, language):
-                    if audio_chunk:  # Only send non-empty chunks
-                        await websocket.send_bytes(audio_chunk)
+                # Generate the audio data
+                if language == "en":
+                    # Use FastPitch for English text
+                    with torch.inference_mode():
+                        wav = global_tts.tts(text=text)
+                        wav = ensure_numpy_array(wav)
+                else:
+                    # Use XTTS v2 for other supported languages
+                    with torch.inference_mode():
+                        wav = global_chinese_tts.tts(
+                            text=text,
+                            speaker_wav=sample_wav_path,
+                            language=language
+                        )
+                        wav = ensure_numpy_array(wav)
+                
+                # Save the audio in the background
+                timestamp = int(time.time())
+                wav_path = f"outputs/output_{timestamp}.wav"
+                opus_path = f"outputs/output_{timestamp}.opus"
+                
+                # Start a task to save the file in the background
+                asyncio.create_task(
+                    save_audio_file_background(wav, wav_path, opus_path, audio_format)
+                )
+                
+                # Normalize and convert to 16-bit PCM
+                wav = np.clip(wav, -1, 1)
+                wav = (wav * 32767).astype(np.int16)
+                
+                # Define chunk size (in samples)
+                chunk_size = 1024
+                total_samples = len(wav)
+                
+                print(f"Total audio samples: {total_samples}")
+                
+                # If WAV format, stream raw PCM chunks
+                if audio_format == "wav":
+                    # Track first chunk timing
+                    first_chunk = True
+                    
+                    # Stream chunks
+                    for i in range(0, total_samples, chunk_size):
+                        chunk = wav[i:min(i + chunk_size, total_samples)]
+                        
+                        # Convert to bytes (raw PCM data)
+                        chunk_bytes = chunk.tobytes()
+                        
+                        if first_chunk:
+                            first_chunk = False
+                            print("Sending first WAV chunk")
+                            
+                        await websocket.send_bytes(chunk_bytes)
+                
+                # If Opus format, use FFmpeg to encode and send chunks
+                elif audio_format == "opus":
+                    # Create a subprocess for FFmpeg
+                    process = subprocess.Popen(
+                        [
+                            "ffmpeg",
+                            "-f", "s16le",      # 16-bit PCM input
+                            "-ar", "22050",     # Sample rate
+                            "-ac", "1",         # Mono
+                            "-i", "pipe:0",     # Read from stdin
+                            "-c:a", "libopus",
+                            "-b:a", "32k",
+                            "-application", "voip",
+                            "-vbr", "on",
+                            "-f", "opus",
+                            "pipe:1"            # Output to stdout
+                        ],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    
+                    # Send the entire PCM data to ffmpeg
+                    opus_data, _ = process.communicate(input=wav.tobytes())
+                    
+                    # Stream the opus data in chunks
+                    opus_chunk_size = 1024  # Bytes per chunk
+                    for i in range(0, len(opus_data), opus_chunk_size):
+                        opus_chunk = opus_data[i:min(i + opus_chunk_size, len(opus_data))]
+                        await websocket.send_bytes(opus_chunk)
+                
                 # Send an empty chunk to signal completion
                 await websocket.send_bytes(b'')
                 
@@ -428,23 +520,54 @@ async def websocket_endpoint(websocket: WebSocket):
 class TTSRequest(BaseModel):
     text: str
     language: Optional[str] = "en"
+    audioFormat: Optional[str] = "opus"  # Default to opus, can be wav or opus
 
+# Helper function to convert wav to opus using FFmpeg
+def convert_wav_to_opus(wav_path, opus_path):
+    try:
+        # Use FFmpeg to convert WAV to Opus
+        subprocess.run(
+            [
+                "ffmpeg", 
+                "-i", wav_path,
+                "-c:a", "libopus",
+                "-b:a", "32k",
+                "-application", "voip",
+                "-vbr", "on",
+                opus_path,
+                "-y"  # Overwrite if exists
+            ],
+            check=True,
+            capture_output=True
+        )
+        return True
+    except Exception as e:
+        print(f"Error converting WAV to Opus: {e}")
+        return False
+
+# Update the /tts endpoint to properly handle single-dimensional arrays
 @app.post("/tts")
 async def generate_audio_http(
     request: TTSRequest,
     api_key: APIKey = Depends(get_api_key)
 ):
     try:
-        # Log usage for the API key (in a real app, store this in a database)
+        # Log usage for the API key
         print(f"API request from user: {API_KEYS[api_key]['user']}")
         
         text = request.text
         language = request.language.lower() if request.language else "en"
+        audio_format = request.audioFormat.lower() if request.audioFormat else "opus"
+        
+        # Validate audio format
+        if audio_format not in ["wav", "opus"]:
+            error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
+            return {"errorCode": error["errorCode"], "message": error["message"]}
         
         if text.startswith('[') and text.endswith(']'):
             text = text.strip('[]').strip('"\'')
             
-        print(f"Processing text: {text} with language: {language}")
+        print(f"Processing text: {text} with language: {language}, format: {audio_format}")
         
         # Validate language
         if language != "en" and language not in SUPPORTED_LANGUAGES:
@@ -459,12 +582,13 @@ async def generate_audio_http(
             return {"errorCode": error["errorCode"], "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"}
         
         timestamp = int(time.time())
-        output_path = f"outputs/output_{timestamp}.wav"
+        wav_path = f"outputs/output_{timestamp}.wav"
+        opus_path = f"outputs/output_{timestamp}.opus"
         
-        # Choose model based on language
+        # Choose model based on language and generate WAV first
         if language == "en":
             print("Using FastPitch model for English")
-            global_tts.tts_to_file(text=text, file_path=output_path)
+            audio_array = global_tts.tts(text=text)
         else:
             print(f"Using XTTS model with language: {language}")
             
@@ -472,61 +596,117 @@ async def generate_audio_http(
                 error = ERROR_CODES["REFERENCE_AUDIO_NOT_FOUND"]
                 return {"errorCode": error["errorCode"], "message": error["message"]}
                 
-            global_chinese_tts.tts_to_file(
+            audio_array = global_chinese_tts.tts(
                 text=text,
-                file_path=output_path,
                 speaker_wav=sample_wav_path,
                 language=language
             )
         
-        # Schedule WAV cleanup without waiting for it to complete
-        asyncio.create_task(async_clean_wav_files())
+        # For wav format, save and return file directly
+        if audio_format == "wav":
+            # Save to WAV file as is - using tts_to_file to avoid array type issues
+            if language == "en":
+                global_tts.tts_to_file(text=text, file_path=wav_path)
+            else:
+                global_chinese_tts.tts_to_file(
+                    text=text,
+                    file_path=wav_path,
+                    speaker_wav=sample_wav_path,
+                    language=language
+                )
+            
+            # Schedule WAV cleanup without waiting for it to complete
+            asyncio.create_task(async_clean_wav_files())
+            
+            return FileResponse(
+                wav_path,
+                media_type="audio/wav",
+                filename=f"tts_output_{timestamp}.wav"
+            )
         
-        # For file responses, we can't add errorCode/message, so we keep this as is
-        return FileResponse(
-            output_path,
-            media_type="audio/wav",
-            filename=f"tts_output_{timestamp}.wav"
-        )
+        # For opus format, use tts_to_file to avoid array issues, then convert to opus
+        elif audio_format == "opus":
+            # Save to WAV file as is - using tts_to_file to avoid array type issues
+            if language == "en":
+                global_tts.tts_to_file(text=text, file_path=wav_path)
+            else:
+                global_chinese_tts.tts_to_file(
+                    text=text,
+                    file_path=wav_path,
+                    speaker_wav=sample_wav_path,
+                    language=language
+                )
+            
+            # Convert WAV to Opus
+            convert_wav_to_opus(wav_path, opus_path)
+            
+            # Clean up WAV file
+            if os.path.exists(wav_path):
+                os.remove(wav_path)
+            
+            # Schedule opus cleanup without waiting for it to complete
+            asyncio.create_task(async_clean_wav_files())
+            
+            # Return the opus file
+            return FileResponse(
+                opus_path,
+                media_type="audio/opus",
+                filename=f"tts_output_{timestamp}.opus"
+            )
+            
     except Exception as e:
         print(f"TTS Error: {str(e)}")
         error = ERROR_CODES["TTS_GENERATION_ERROR"]
         return {"errorCode": error["errorCode"], "message": error["message"], "details": str(e)}
 
-# Update the usage endpoint to reflect unlimited usage for special keys
-@app.get("/usage")
-async def get_usage(api_key: str = Depends(get_api_key)):
-    # Check one more time if the API key is valid (for extra safety)
-    if api_key not in API_KEYS:
-        error = ERROR_CODES["INVALID_API_KEY"]
-        return JSONResponse(
-            status_code=403,
-            content={"errorCode": error["errorCode"], "message": error["message"]}
-        )
-    
-    # If we get here, the API key is valid
-    success = ERROR_CODES["SUCCESS"]
-    
-    user_info = API_KEYS[api_key]
-    rate_limit_value = user_info["rate_limit"]
-    
-    # Format the rate limit display
-    rate_limit_display = "Unlimited" if rate_limit_value == -1 else rate_limit_value
-    
-    return {
-        "errorCode": success["errorCode"],
-        "message": success["message"],
-        "data": {
-            "user": user_info["user"],
-            "rate_limit": rate_limit_display,
-            "usage": {
-                "requests_this_month": 42,  # Example value
-                "tokens_this_month": 1250   # Example value
-            }
-        }
-    }
+# Update the ensure_numpy_array function to handle the zero-dimensional array case
+def ensure_numpy_array(audio_array):
+    if isinstance(audio_array, list):
+        if len(audio_array) == 0:  # Empty list
+            return np.array([])
+        elif len(audio_array) == 1:
+            return audio_array[0]
+        else:
+            # Check if any array is zero-dimensional
+            for i, arr in enumerate(audio_array):
+                if not arr.shape or arr.size == 0:
+                    # Skip zero-dimensional arrays
+                    audio_array[i] = np.array([])
+            
+            # Filter out empty arrays
+            non_empty_arrays = [arr for arr in audio_array if arr.size > 0]
+            
+            if not non_empty_arrays:
+                return np.array([])
+            elif len(non_empty_arrays) == 1:
+                return non_empty_arrays[0]
+            else:
+                try:
+                    return np.concatenate(non_empty_arrays)
+                except ValueError:
+                    # If concatenation still fails, return the first non-empty array
+                    print("Warning: Could not concatenate arrays, returning first array")
+                    return non_empty_arrays[0]
+    return audio_array
 
-# Update the endpoint name and implementation for better performance
+# Helper function to save audio files in the background
+async def save_audio_file_background(wav_array, wav_path, opus_path, audio_format):
+    try:
+        # Save WAV file
+        sample_rate = 22050
+        wavfile.write(wav_path, sample_rate, wav_array)
+        
+        # If opus format, convert WAV to Opus
+        if audio_format == "opus":
+            convert_wav_to_opus(wav_path, opus_path)
+            
+            # Delete the temporary WAV file
+            if os.path.exists(wav_path):
+                os.remove(wav_path)
+    except Exception as e:
+        print(f"Error saving audio file: {e}")
+
+# Update the HTTP stream endpoint
 @app.post("/tts-http-stream")
 async def generate_audio_http_stream(
     request: TTSRequest,
@@ -538,11 +718,20 @@ async def generate_audio_http_stream(
         
         text = request.text
         language = request.language.lower() if request.language else "en"
+        audio_format = request.audioFormat.lower() if request.audioFormat else "opus"
+        
+        # Validate audio format
+        if audio_format not in ["wav", "opus"]:
+            error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
+            return JSONResponse(
+                status_code=400,
+                content={"errorCode": error["errorCode"], "message": error["message"]}
+            )
         
         if text.startswith('[') and text.endswith(']'):
             text = text.strip('[]').strip('"\'')
             
-        print(f"Processing text: {text} with language: {language}")
+        print(f"Processing text: {text} with language: {language}, format: {audio_format}")
         
         # Validate language
         if language != "en" and language not in SUPPORTED_LANGUAGES:
@@ -562,8 +751,8 @@ async def generate_audio_http_stream(
                 content={"errorCode": error["errorCode"], "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"}
             )
         
-        # Create efficient binary stream generator
-        async def binary_stream_generator():
+        # Binary stream generator for WAV format
+        async def wav_stream_generator():
             # Create WAV header first
             sample_rate = 22050
             bits_per_sample = 16
@@ -597,11 +786,45 @@ async def generate_audio_http_stream(
             # Buffer to collect audio data for size calculations
             data_buffer = bytearray()
             
+            # Generate audio
+            if language == "en":
+                # Use FastPitch for English text
+                with torch.inference_mode():
+                    wav = global_tts.tts(text=text)
+                    wav = ensure_numpy_array(wav)
+            else:
+                # Use XTTS v2 for other supported languages
+                with torch.inference_mode():
+                    wav = global_chinese_tts.tts(
+                        text=text,
+                        speaker_wav=sample_wav_path,
+                        language=language
+                    )
+                    wav = ensure_numpy_array(wav)
+            
+            # Save the audio in the background
+            timestamp = int(time.time())
+            wav_path = f"outputs/output_{timestamp}.wav"
+            opus_path = f"outputs/output_{timestamp}.opus"
+            
+            # Start a task to save the file in the background
+            asyncio.create_task(
+                save_audio_file_background(wav, wav_path, opus_path, audio_format)
+            )
+            
+            # Normalize and convert to 16-bit PCM
+            wav = np.clip(wav, -1, 1)
+            wav = (wav * 32767).astype(np.int16)
+            
             # Stream audio chunks
-            async for audio_chunk in generate_audio_ws(text, language):
-                if audio_chunk:
-                    data_buffer.extend(audio_chunk)
-                    yield audio_chunk
+            chunk_size = 1024  # Samples per chunk
+            total_samples = len(wav)
+            
+            for i in range(0, total_samples, chunk_size):
+                chunk = wav[i:min(i + chunk_size, total_samples)]
+                chunk_bytes = chunk.tobytes()
+                data_buffer.extend(chunk_bytes)
+                yield chunk_bytes
             
             # Calculate sizes and update the header
             data_size = len(data_buffer)
@@ -628,13 +851,87 @@ async def generate_audio_http_stream(
             
             # Schedule WAV cleanup without waiting for it to complete
             asyncio.create_task(async_clean_wav_files())
-                
+        
+        # Binary stream generator for Opus format
+        async def opus_stream_generator():
+            # Generate audio
+            if language == "en":
+                # Use FastPitch for English text
+                with torch.inference_mode():
+                    wav = global_tts.tts(text=text)
+                    wav = ensure_numpy_array(wav)
+            else:
+                # Use XTTS v2 for other supported languages
+                with torch.inference_mode():
+                    wav = global_chinese_tts.tts(
+                        text=text,
+                        speaker_wav=sample_wav_path,
+                        language=language
+                    )
+                    wav = ensure_numpy_array(wav)
+            
+            # Save the audio in the background
+            timestamp = int(time.time())
+            wav_path = f"outputs/output_{timestamp}.wav"
+            opus_path = f"outputs/output_{timestamp}.opus"
+            
+            # Start a task to save the file in the background
+            asyncio.create_task(
+                save_audio_file_background(wav, wav_path, opus_path, audio_format)
+            )
+            
+            # Normalize and convert to 16-bit PCM
+            wav = np.clip(wav, -1, 1)
+            wav = (wav * 32767).astype(np.int16)
+            
+            # Create a subprocess for FFmpeg
+            process = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-f", "s16le",      # 16-bit PCM input
+                    "-ar", "22050",     # Sample rate
+                    "-ac", "1",         # Mono
+                    "-i", "pipe:0",     # Read from stdin
+                    "-c:a", "libopus",
+                    "-b:a", "32k",
+                    "-application", "voip",
+                    "-vbr", "on",
+                    "-f", "opus",
+                    "pipe:1"            # Output to stdout
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            # Send the entire PCM data to ffmpeg
+            opus_data, _ = process.communicate(input=wav.tobytes())
+            
+            # Stream the opus data in chunks
+            opus_chunk_size = 1024  # Bytes per chunk
+            for i in range(0, len(opus_data), opus_chunk_size):
+                opus_chunk = opus_data[i:min(i + opus_chunk_size, len(opus_data))]
+                yield opus_chunk
+            
+            # Schedule WAV cleanup without waiting for it to complete
+            asyncio.create_task(async_clean_wav_files())
+        
+        # Choose the appropriate generator based on format
+        if audio_format == "wav":
+            generator = wav_stream_generator()
+            media_type = "audio/wav"
+            filename = f"tts_output_{int(time.time())}.wav"
+        else:  # opus
+            generator = opus_stream_generator()
+            media_type = "audio/opus"
+            filename = f"tts_output_{int(time.time())}.opus"
+        
         # Return the streaming response
         return StreamingResponse(
-            binary_stream_generator(),
-            media_type="audio/wav",
+            generator,
+            media_type=media_type,
             headers={
-                "Content-Disposition": f"attachment; filename=tts_output_{int(time.time())}.wav"
+                "Content-Disposition": f"attachment; filename={filename}"
             }
         )
         
