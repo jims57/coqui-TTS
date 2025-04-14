@@ -794,6 +794,9 @@ async def save_audio_file_background(wav_array, wav_path, opus_path, audio_forma
             # Delete the temporary WAV file
             if os.path.exists(wav_path):
                 os.remove(wav_path)
+                
+        # Schedule cleanup after saving the file
+        asyncio.create_task(async_clean_wav_files())
     except Exception as e:
         print(f"Error saving audio file: {e}")
 
