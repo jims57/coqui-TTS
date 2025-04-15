@@ -631,10 +631,10 @@ async def generate_audio_http(
         wav_path = f"outputs/output_{timestamp}.wav"
         opus_path = f"outputs/output_{timestamp}.opus"
         
-        # Choose model based on language and generate WAV first
+        # Generate directly to file to avoid duplicate processing
         if language == "en":
             print("Using FastPitch model for English")
-            audio_array = global_tts.tts(text=text)
+            global_tts.tts_to_file(text=text, file_path=wav_path)
         else:
             print(f"Using XTTS model with language: {language}")
             
@@ -642,25 +642,15 @@ async def generate_audio_http(
                 error = ERROR_CODES["REFERENCE_AUDIO_NOT_FOUND"]
                 return {"errorCode": error["errorCode"], "message": error["message"]}
                 
-            audio_array = global_chinese_tts.tts(
+            global_chinese_tts.tts_to_file(
                 text=text,
+                file_path=wav_path,
                 speaker_wav=sample_wav_path,
                 language=language
             )
         
-        # For wav format, save and return file directly
+        # For wav format, return file directly
         if audio_format == "wav":
-            # Save to WAV file as is - using tts_to_file to avoid array type issues
-            if language == "en":
-                global_tts.tts_to_file(text=text, file_path=wav_path)
-            else:
-                global_chinese_tts.tts_to_file(
-                    text=text,
-                    file_path=wav_path,
-                    speaker_wav=sample_wav_path,
-                    language=language
-                )
-            
             # Schedule WAV cleanup without waiting for it to complete
             asyncio.create_task(async_clean_wav_files())
             
@@ -670,19 +660,8 @@ async def generate_audio_http(
                 filename=f"tts_output_{timestamp}.wav"
             )
         
-        # For opus format, use tts_to_file to avoid array issues, then convert to opus
+        # For opus format, convert WAV to opus
         elif audio_format == "opus":
-            # Save to WAV file as is - using tts_to_file to avoid array type issues
-            if language == "en":
-                global_tts.tts_to_file(text=text, file_path=wav_path)
-            else:
-                global_chinese_tts.tts_to_file(
-                    text=text,
-                    file_path=wav_path,
-                    speaker_wav=sample_wav_path,
-                    language=language
-                )
-            
             # Convert WAV to Opus
             convert_wav_to_opus(wav_path, opus_path)
             
