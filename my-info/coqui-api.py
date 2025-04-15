@@ -1062,6 +1062,19 @@ async def generate_audio_http_stream(
             }
         )
 
+@app.get("/test")
+async def test_endpoint():
+    """
+    Simple test endpoint that returns a JSON response.
+    Used to measure round-trip time from client to server and back.
+    """
+    return {
+        "status": "success",
+        "timestamp": time.time(),
+        "message": "API is operational"
+    }
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9002)
 
