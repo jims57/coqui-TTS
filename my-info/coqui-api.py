@@ -629,100 +629,79 @@ async def generate_audio_http(
         
         timestamp = int(time.time())
         
-        # Generate audio directly in memory instead of writing to file
-        start_time = time.time()
+        # Generate audio directly in memory
+        if language == "en":
+            print("Using FastPitch model for English")
+            with torch.inference_mode():
+                wav = global_tts.tts(text=text)
+        else:
+            print(f"Using XTTS model with language: {language}")
+            
+            if not os.path.exists(sample_wav_path):
+                error = ERROR_CODES["REFERENCE_AUDIO_NOT_FOUND"]
+                return {"errorCode": error["errorCode"], "message": error["message"]}
+                
+            with torch.inference_mode():
+                wav = global_chinese_tts.tts(
+                    text=text,
+                    speaker_wav=sample_wav_path,
+                    language=language
+                )
         
-        try:
-            # Generate audio directly in memory
-            if language == "en":
-                print("Using FastPitch model for English")
-                with torch.inference_mode():
-                    wav = global_tts.tts(text=text)
-            else:
-                print(f"Using XTTS model with language: {language}")
-                
-                if not os.path.exists(sample_wav_path):
-                    error = ERROR_CODES["REFERENCE_AUDIO_NOT_FOUND"]
-                    return {"errorCode": error["errorCode"], "message": error["message"]}
-                    
-                with torch.inference_mode():
-                    wav = global_chinese_tts.tts(
-                        text=text,
-                        speaker_wav=sample_wav_path,
-                        language=language
-                    )
+        # Normalize and convert to 16-bit PCM
+        wav = np.clip(wav, -1, 1)
+        wav = (wav * 32767).astype(np.int16)
+        
+        # Start a background task for cleanup
+        cleanup_task = asyncio.create_task(async_clean_wav_files())
+        
+        # Prepare response with minimal latency
+        if audio_format == "wav":
+            # Create WAV file in memory
+            wav_io = io.BytesIO()
+            wavfile.write(wav_io, 22050, wav)
+            wav_io.seek(0)
             
-            print(f" > Processing time: {time.time() - start_time}")
-            print(f" > Real-time factor: {(time.time() - start_time) / (len(wav) / 22050)}")
+            return StreamingResponse(
+                wav_io,
+                media_type="audio/wav",
+                headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.wav"}
+            )
             
-            # For wav format, return audio directly
-            if audio_format == "wav":
-                # Normalize and convert to 16-bit PCM
-                wav = np.clip(wav, -1, 1)
-                wav = (wav * 32767).astype(np.int16)
-                
-                # Create WAV file in memory
-                wav_io = io.BytesIO()
-                wavfile.write(wav_io, 22050, wav)
-                wav_io.seek(0)
-                
-                # Schedule cleanup in the background without waiting
-                asyncio.create_task(async_clean_wav_files())
-                
-                return StreamingResponse(
-                    wav_io,
-                    media_type="audio/wav",
-                    headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.wav"}
-                )
+        elif audio_format == "opus":
+            # Start FFmpeg process
+            process = subprocess.Popen(
+                [
+                    "ffmpeg",
+                    "-f", "s16le",      # 16-bit PCM input
+                    "-ar", "22050",     # Sample rate
+                    "-ac", "1",         # Mono
+                    "-i", "pipe:0",     # Read from stdin
+                    "-c:a", "libopus",
+                    "-b:a", "32k",
+                    "-application", "voip",
+                    "-vbr", "on",
+                    "-f", "opus",
+                    "pipe:1"            # Output to stdout
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
             
-            # For opus format, use ffmpeg to convert in memory
-            elif audio_format == "opus":
-                # Normalize and convert to 16-bit PCM
-                wav = np.clip(wav, -1, 1)
-                wav = (wav * 32767).astype(np.int16)
-                
-                # Use FFmpeg to convert to opus in memory
-                process = subprocess.Popen(
-                    [
-                        "ffmpeg",
-                        "-f", "s16le",      # 16-bit PCM input
-                        "-ar", "22050",     # Sample rate
-                        "-ac", "1",         # Mono
-                        "-i", "pipe:0",     # Read from stdin
-                        "-c:a", "libopus",
-                        "-b:a", "32k",
-                        "-application", "voip",
-                        "-vbr", "on",
-                        "-f", "opus",
-                        "pipe:1"            # Output to stdout
-                    ],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-                
-                # Send wav data to ffmpeg and get opus data
-                opus_data, stderr = process.communicate(input=wav.tobytes())
-                
-                if process.returncode != 0:
-                    print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                    error = ERROR_CODES["TTS_GENERATION_ERROR"]
-                    return {"errorCode": error["errorCode"], "message": f"{error['message']}: FFmpeg encoding failed"}
-                
-                # Schedule cleanup in the background without waiting
-                asyncio.create_task(async_clean_wav_files())
-                
-                # Return the opus data directly
-                return StreamingResponse(
-                    io.BytesIO(opus_data),
-                    media_type="audio/opus",
-                    headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.opus"}
-                )
-                
-        except Exception as e:
-            print(f"Error in audio generation: {e}")
-            error = ERROR_CODES["TTS_GENERATION_ERROR"]
-            return {"errorCode": error["errorCode"], "message": error["message"], "details": str(e)}
+            # Send wav data to ffmpeg and get opus data
+            opus_data, stderr = process.communicate(input=wav.tobytes())
+            
+            if process.returncode != 0:
+                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                return {"errorCode": error["errorCode"], "message": f"{error['message']}: FFmpeg encoding failed"}
+            
+            return StreamingResponse(
+                io.BytesIO(opus_data),
+                media_type="audio/opus",
+                headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.opus"}
+            )
             
     except Exception as e:
         print(f"TTS Error: {str(e)}")
