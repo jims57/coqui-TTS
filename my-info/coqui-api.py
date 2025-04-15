@@ -628,56 +628,101 @@ async def generate_audio_http(
             return {"errorCode": error["errorCode"], "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"}
         
         timestamp = int(time.time())
-        wav_path = f"outputs/output_{timestamp}.wav"
-        opus_path = f"outputs/output_{timestamp}.opus"
         
-        # Generate directly to file to avoid duplicate processing
-        if language == "en":
-            print("Using FastPitch model for English")
-            global_tts.tts_to_file(text=text, file_path=wav_path)
-        else:
-            print(f"Using XTTS model with language: {language}")
-            
-            if not os.path.exists(sample_wav_path):
-                error = ERROR_CODES["REFERENCE_AUDIO_NOT_FOUND"]
-                return {"errorCode": error["errorCode"], "message": error["message"]}
+        # Generate audio directly in memory instead of writing to file
+        start_time = time.time()
+        
+        try:
+            # Generate audio directly in memory
+            if language == "en":
+                print("Using FastPitch model for English")
+                with torch.inference_mode():
+                    wav = global_tts.tts(text=text)
+            else:
+                print(f"Using XTTS model with language: {language}")
                 
-            global_chinese_tts.tts_to_file(
-                text=text,
-                file_path=wav_path,
-                speaker_wav=sample_wav_path,
-                language=language
-            )
-        
-        # For wav format, return file directly
-        if audio_format == "wav":
-            # Schedule WAV cleanup without waiting for it to complete
-            asyncio.create_task(async_clean_wav_files())
+                if not os.path.exists(sample_wav_path):
+                    error = ERROR_CODES["REFERENCE_AUDIO_NOT_FOUND"]
+                    return {"errorCode": error["errorCode"], "message": error["message"]}
+                    
+                with torch.inference_mode():
+                    wav = global_chinese_tts.tts(
+                        text=text,
+                        speaker_wav=sample_wav_path,
+                        language=language
+                    )
             
-            return FileResponse(
-                wav_path,
-                media_type="audio/wav",
-                filename=f"tts_output_{timestamp}.wav"
-            )
-        
-        # For opus format, convert WAV to opus
-        elif audio_format == "opus":
-            # Convert WAV to Opus
-            convert_wav_to_opus(wav_path, opus_path)
+            print(f" > Processing time: {time.time() - start_time}")
+            print(f" > Real-time factor: {(time.time() - start_time) / (len(wav) / 22050)}")
             
-            # Clean up WAV file
-            if os.path.exists(wav_path):
-                os.remove(wav_path)
+            # For wav format, return audio directly
+            if audio_format == "wav":
+                # Normalize and convert to 16-bit PCM
+                wav = np.clip(wav, -1, 1)
+                wav = (wav * 32767).astype(np.int16)
+                
+                # Create WAV file in memory
+                wav_io = io.BytesIO()
+                wavfile.write(wav_io, 22050, wav)
+                wav_io.seek(0)
+                
+                # Schedule cleanup in the background without waiting
+                asyncio.create_task(async_clean_wav_files())
+                
+                return StreamingResponse(
+                    wav_io,
+                    media_type="audio/wav",
+                    headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.wav"}
+                )
             
-            # Schedule opus cleanup without waiting for it to complete
-            asyncio.create_task(async_clean_wav_files())
-            
-            # Return the opus file
-            return FileResponse(
-                opus_path,
-                media_type="audio/opus",
-                filename=f"tts_output_{timestamp}.opus"
-            )
+            # For opus format, use ffmpeg to convert in memory
+            elif audio_format == "opus":
+                # Normalize and convert to 16-bit PCM
+                wav = np.clip(wav, -1, 1)
+                wav = (wav * 32767).astype(np.int16)
+                
+                # Use FFmpeg to convert to opus in memory
+                process = subprocess.Popen(
+                    [
+                        "ffmpeg",
+                        "-f", "s16le",      # 16-bit PCM input
+                        "-ar", "22050",     # Sample rate
+                        "-ac", "1",         # Mono
+                        "-i", "pipe:0",     # Read from stdin
+                        "-c:a", "libopus",
+                        "-b:a", "32k",
+                        "-application", "voip",
+                        "-vbr", "on",
+                        "-f", "opus",
+                        "pipe:1"            # Output to stdout
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                
+                # Send wav data to ffmpeg and get opus data
+                opus_data, stderr = process.communicate(input=wav.tobytes())
+                
+                if process.returncode != 0:
+                    print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                    error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                    return {"errorCode": error["errorCode"], "message": f"{error['message']}: FFmpeg encoding failed"}
+                
+                # Schedule cleanup in the background without waiting
+                asyncio.create_task(async_clean_wav_files())
+                
+                # Return the opus data directly
+                return StreamingResponse(
+                    io.BytesIO(opus_data),
+                    media_type="audio/opus",
+                    headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.opus"}
+                )
+                
+        except Exception as e:
+            print(f"Error in audio generation: {e}")
+            error = ERROR_CODES["TTS_GENERATION_ERROR"]
+            return {"errorCode": error["errorCode"], "message": error["message"], "details": str(e)}
             
     except Exception as e:
         print(f"TTS Error: {str(e)}")
