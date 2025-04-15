@@ -30,6 +30,7 @@ import struct
 import asyncio
 from clean_wav_files_in_outputs import async_clean_wav_files
 import subprocess
+import concurrent.futures
 
 
 os.environ["TTS_HOME"] = "/app/coqui-tts"
@@ -89,6 +90,10 @@ app = FastAPI()
 # Global variable for TTS model
 global_tts = None
 
+# Add this global variable near the top of your file with other global variables
+ffmpeg_process_pool = []
+MAX_FFMPEG_PROCESSES = 3  # Adjust based on your server capacity
+
 def initialize_tts():
     global global_tts, global_chinese_tts
     try:
@@ -113,12 +118,119 @@ def initialize_tts():
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize TTS models when the FastAPI app starts"""
-    global global_tts, global_chinese_tts
+    """Initialize TTS models and FFmpeg processes when the FastAPI app starts"""
+    global global_tts, global_chinese_tts, ffmpeg_process_pool
     if global_tts is None:
         global_tts, global_chinese_tts = initialize_tts()
+    
+    # Pre-initialize FFmpeg processes for faster conversion
+    for _ in range(MAX_FFMPEG_PROCESSES):
+        process = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-f", "s16le",
+                "-ar", "22050",
+                "-ac", "1",
+                "-i", "pipe:0",
+                "-c:a", "libopus",
+                "-b:a", "32k",
+                "-application", "voip",
+                "-vbr", "on",
+                "-f", "opus",
+                "pipe:1"
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=10485760  # 10MB buffer
+        )
+        ffmpeg_process_pool.append(process)
+    
     # Ensure outputs directory exists
     os.makedirs("outputs", exist_ok=True)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Clean up resources when shutting down"""
+    global ffmpeg_process_pool
+    
+    # Terminate all FFmpeg processes
+    for process in ffmpeg_process_pool:
+        try:
+            process.terminate()
+            process.wait(timeout=1)
+        except:
+            process.kill()
+    
+    ffmpeg_process_pool = []
+
+# Add this function to get an available FFmpeg process
+def get_ffmpeg_process():
+    global ffmpeg_process_pool
+    
+    if not ffmpeg_process_pool:
+        # If pool is empty, create a new process
+        process = subprocess.Popen(
+            [
+                "ffmpeg",
+                "-f", "s16le",
+                "-ar", "22050",
+                "-ac", "1",
+                "-i", "pipe:0",
+                "-c:a", "libopus",
+                "-b:a", "32k",
+                "-application", "voip",
+                "-vbr", "on",
+                "-f", "opus",
+                "pipe:1"
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=10485760  # 10MB buffer
+        )
+        return process
+    
+    return ffmpeg_process_pool.pop()
+
+# Add this function to return a process to the pool
+def return_ffmpeg_process(process):
+    global ffmpeg_process_pool
+    
+    # Check if process is still usable
+    if process.returncode is None:
+        # Reset process by draining any remaining output
+        try:
+            # Non-blocking read to clear any remaining output
+            process.stdout.read(0)
+            process.stderr.read(0)
+            ffmpeg_process_pool.append(process)
+        except:
+            # If process is not usable, don't return it to the pool
+            try:
+                process.terminate()
+            except:
+                pass
+    else:
+        # Process has ended, don't return to pool
+        try:
+            process.terminate()
+        except:
+            pass
+
+# Optimized streaming version for audio response
+async def stream_audio_response(audio_data, media_type, filename):
+    async def audio_generator():
+        # Send in reasonably sized chunks to minimize latency
+        chunk_size = 8192  # 8KB chunks
+        for i in range(0, len(audio_data), chunk_size):
+            yield audio_data[i:min(i+chunk_size, len(audio_data))]
+    
+    return StreamingResponse(
+        audio_generator(),
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
 
 def detect_language(text):
     """
@@ -607,7 +719,7 @@ async def generate_audio_http(
         language = request.language.lower() if request.language else "en"
         audio_format = request.audioFormat.lower() if request.audioFormat else "opus"
         
-        # Validate audio format
+        # Quick validation for common cases to minimize latency
         if audio_format not in ["wav", "opus"]:
             error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
             return {"errorCode": error["errorCode"], "message": error["message"]}
@@ -617,7 +729,7 @@ async def generate_audio_http(
             
         print(f"Processing text: {text} with language: {language}, format: {audio_format}")
         
-        # Validate language
+        # Validate language 
         if language != "en" and language not in SUPPORTED_LANGUAGES:
             error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
             return {"errorCode": error["errorCode"], "message": f"{error['message']}: {language}"}
@@ -657,6 +769,9 @@ async def generate_audio_http(
         tts_time = time.time() - tts_start
         print(f"DEBUG: TTS generation time: {tts_time * 1000:.2f} ms")
         
+        # Start cleanup in background immediately after TTS completes
+        asyncio.create_task(async_clean_wav_files())
+        
         # Normalize and convert to 16-bit PCM
         normalize_start = time.time()
         wav = np.clip(wav, -1, 1)
@@ -664,56 +779,80 @@ async def generate_audio_http(
         normalize_time = time.time() - normalize_start
         print(f"DEBUG: Normalization time: {normalize_time * 1000:.2f} ms")
         
-        # Start a background task for cleanup - don't wait for it
-        cleanup_start = time.time()
-        asyncio.create_task(async_clean_wav_files())
-        cleanup_time = time.time() - cleanup_start
-        print(f"DEBUG: Cleanup task creation time: {cleanup_time * 1000:.2f} ms")
-        
         # Prepare response with minimal latency
         format_start = time.time()
         if audio_format == "wav":
-            # Create WAV file in memory
+            # Create WAV file in memory more efficiently
             wav_io_start = time.time()
             wav_io = io.BytesIO()
-            wavfile.write(wav_io, 22050, wav)
+            
+            # Create WAV header manually (faster than using wavfile.write)
+            sample_rate = 22050
+            channels = 1
+            bits_per_sample = 16
+            
+            # Calculate header values
+            data_size = len(wav) * bits_per_sample // 8
+            file_size = 36 + data_size
+            
+            # Write WAV header
+            wav_io.write(b'RIFF')
+            wav_io.write(struct.pack('<I', file_size))
+            wav_io.write(b'WAVE')
+            wav_io.write(b'fmt ')
+            wav_io.write(struct.pack('<I', 16))  # fmt chunk size
+            wav_io.write(struct.pack('<H', 1))   # format = PCM
+            wav_io.write(struct.pack('<H', channels))
+            wav_io.write(struct.pack('<I', sample_rate))
+            wav_io.write(struct.pack('<I', sample_rate * channels * bits_per_sample // 8))  # byte rate
+            wav_io.write(struct.pack('<H', channels * bits_per_sample // 8))  # block align
+            wav_io.write(struct.pack('<H', bits_per_sample))
+            wav_io.write(b'data')
+            wav_io.write(struct.pack('<I', data_size))
+            
+            # Write audio data
+            wav_io.write(wav.tobytes())
             wav_io.seek(0)
+            
             wav_io_time = time.time() - wav_io_start
             print(f"DEBUG: WAV in-memory conversion time: {wav_io_time * 1000:.2f} ms")
             
-            response_start = time.time()
+            # Return WAV response directly to minimize latency
             response = StreamingResponse(
                 wav_io,
                 media_type="audio/wav",
                 headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.wav"}
             )
-            response_time = time.time() - response_start
-            print(f"DEBUG: StreamingResponse creation time (WAV): {response_time * 1000:.2f} ms")
             
         elif audio_format == "opus":
-            # Start FFmpeg process
+            # Direct FFmpeg conversion - simpler and more reliable
             ffmpeg_start = time.time()
+            
+            # WAV to OPUS conversion using ffmpeg in a single operation
             process = subprocess.Popen(
                 [
                     "ffmpeg",
-                    "-f", "s16le",      # 16-bit PCM input
-                    "-ar", "22050",     # Sample rate
-                    "-ac", "1",         # Mono
-                    "-i", "pipe:0",     # Read from stdin
+                    "-f", "s16le",
+                    "-ar", "22050",  # sample rate
+                    "-ac", "1",      # mono
+                    "-i", "pipe:0",  # input from stdin
                     "-c:a", "libopus",
                     "-b:a", "32k",
                     "-application", "voip",
                     "-vbr", "on",
+                    "-compression_level", "10",  # faster encoding
+                    "-frame_duration", "20",    # shorter frame duration for lower latency
                     "-f", "opus",
-                    "pipe:1"            # Output to stdout
+                    "pipe:1"         # output to stdout
                 ],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
             
-            # Send wav data to ffmpeg and get opus data
+            # Send audio data to ffmpeg process
             opus_data, stderr = process.communicate(input=wav.tobytes())
+            
             ffmpeg_time = time.time() - ffmpeg_start
             print(f"DEBUG: FFmpeg opus conversion time: {ffmpeg_time * 1000:.2f} ms")
             
@@ -722,25 +861,21 @@ async def generate_audio_http(
                 error = ERROR_CODES["TTS_GENERATION_ERROR"]
                 return {"errorCode": error["errorCode"], "message": f"{error['message']}: FFmpeg encoding failed"}
             
-            response_start = time.time()
+            # Create response from opus data
             response = StreamingResponse(
                 io.BytesIO(opus_data),
                 media_type="audio/opus",
                 headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.opus"}
             )
-            response_time = time.time() - response_start
-            print(f"DEBUG: StreamingResponse creation time (Opus): {response_time * 1000:.2f} ms")
         
         format_time = time.time() - format_start
         print(f"DEBUG: Total format conversion time: {format_time * 1000:.2f} ms")
         
         total_time = time.time() - overall_start
         print(f"DEBUG: Total endpoint processing time: {total_time * 1000:.2f} ms")
-        print(f"DEBUG: Time until response ready: {total_time * 1000:.2f} ms")
+        print(f"DEBUG: Using pure in-memory audio processing, no file I/O")
         
-        # Confirm we're using in-memory processing and not file I/O
-        print("DEBUG: Using pure in-memory audio processing, no file I/O")
-        
+        # Return response immediately after it's ready
         return response
             
     except Exception as e:
