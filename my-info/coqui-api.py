@@ -597,6 +597,8 @@ async def generate_audio_http(
     request: TTSRequest,
     api_key: APIKey = Depends(get_api_key)
 ):
+    overall_start = time.time()
+    validation_start = time.time()
     try:
         # Log usage for the API key
         print(f"API request from user: {API_KEYS[api_key]['user']}")
@@ -627,9 +629,13 @@ async def generate_audio_http(
             error = ERROR_CODES["LANGUAGE_MISMATCH"]
             return {"errorCode": error["errorCode"], "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"}
         
+        validation_time = time.time() - validation_start
+        print(f"DEBUG: Validation time: {validation_time * 1000:.2f} ms")
+        
         timestamp = int(time.time())
         
         # Generate audio directly in memory
+        tts_start = time.time()
         if language == "en":
             print("Using FastPitch model for English")
             with torch.inference_mode():
@@ -648,28 +654,45 @@ async def generate_audio_http(
                     language=language
                 )
         
+        tts_time = time.time() - tts_start
+        print(f"DEBUG: TTS generation time: {tts_time * 1000:.2f} ms")
+        
         # Normalize and convert to 16-bit PCM
+        normalize_start = time.time()
         wav = np.clip(wav, -1, 1)
         wav = (wav * 32767).astype(np.int16)
+        normalize_time = time.time() - normalize_start
+        print(f"DEBUG: Normalization time: {normalize_time * 1000:.2f} ms")
         
-        # Start a background task for cleanup
-        cleanup_task = asyncio.create_task(async_clean_wav_files())
+        # Start a background task for cleanup - don't wait for it
+        cleanup_start = time.time()
+        asyncio.create_task(async_clean_wav_files())
+        cleanup_time = time.time() - cleanup_start
+        print(f"DEBUG: Cleanup task creation time: {cleanup_time * 1000:.2f} ms")
         
         # Prepare response with minimal latency
+        format_start = time.time()
         if audio_format == "wav":
             # Create WAV file in memory
+            wav_io_start = time.time()
             wav_io = io.BytesIO()
             wavfile.write(wav_io, 22050, wav)
             wav_io.seek(0)
+            wav_io_time = time.time() - wav_io_start
+            print(f"DEBUG: WAV in-memory conversion time: {wav_io_time * 1000:.2f} ms")
             
-            return StreamingResponse(
+            response_start = time.time()
+            response = StreamingResponse(
                 wav_io,
                 media_type="audio/wav",
                 headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.wav"}
             )
+            response_time = time.time() - response_start
+            print(f"DEBUG: StreamingResponse creation time (WAV): {response_time * 1000:.2f} ms")
             
         elif audio_format == "opus":
             # Start FFmpeg process
+            ffmpeg_start = time.time()
             process = subprocess.Popen(
                 [
                     "ffmpeg",
@@ -691,19 +714,38 @@ async def generate_audio_http(
             
             # Send wav data to ffmpeg and get opus data
             opus_data, stderr = process.communicate(input=wav.tobytes())
+            ffmpeg_time = time.time() - ffmpeg_start
+            print(f"DEBUG: FFmpeg opus conversion time: {ffmpeg_time * 1000:.2f} ms")
             
             if process.returncode != 0:
                 print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
                 error = ERROR_CODES["TTS_GENERATION_ERROR"]
                 return {"errorCode": error["errorCode"], "message": f"{error['message']}: FFmpeg encoding failed"}
             
-            return StreamingResponse(
+            response_start = time.time()
+            response = StreamingResponse(
                 io.BytesIO(opus_data),
                 media_type="audio/opus",
                 headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.opus"}
             )
+            response_time = time.time() - response_start
+            print(f"DEBUG: StreamingResponse creation time (Opus): {response_time * 1000:.2f} ms")
+        
+        format_time = time.time() - format_start
+        print(f"DEBUG: Total format conversion time: {format_time * 1000:.2f} ms")
+        
+        total_time = time.time() - overall_start
+        print(f"DEBUG: Total endpoint processing time: {total_time * 1000:.2f} ms")
+        print(f"DEBUG: Time until response ready: {total_time * 1000:.2f} ms")
+        
+        # Confirm we're using in-memory processing and not file I/O
+        print("DEBUG: Using pure in-memory audio processing, no file I/O")
+        
+        return response
             
     except Exception as e:
+        error_time = time.time() - overall_start
+        print(f"DEBUG: Error occurred after {error_time * 1000:.2f} ms")
         print(f"TTS Error: {str(e)}")
         error = ERROR_CODES["TTS_GENERATION_ERROR"]
         return {"errorCode": error["errorCode"], "message": error["message"], "details": str(e)}
