@@ -46,17 +46,38 @@ def clean_wav_files(output_dir: str = "outputs", total_files: int = 5) -> None:
     
     print(f"Cleanup complete. Kept the {total_files} most recent audio files.")
 
-async def async_clean_wav_files(output_dir: str = "outputs", total_files: int = 5) -> None:
-    """
-    Async version of clean_wav_files that runs the cleanup in a separate thread.
-    
-    Args:
-        output_dir: Directory containing audio files (default: "outputs")
-        total_files: Maximum number of audio files to keep (default: 5)
-    """
-    # Run the synchronous cleanup function in a thread to avoid blocking
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, lambda: clean_wav_files(output_dir, total_files))
+async def async_clean_wav_files():
+    """Clean WAV files in outputs directory asynchronously, keeping only the 5 most recent files."""
+    try:
+        print("Starting cleanup process...")
+        keep_files = 5
+        # Get all wav and opus files in the outputs directory
+        files = []
+        if os.path.exists("outputs"):
+            for file in os.listdir("outputs"):
+                if file.endswith(".wav") or file.endswith(".opus"):
+                    file_path = os.path.join("outputs", file)
+                    if os.path.isfile(file_path):
+                        files.append(file_path)
+        
+        # Sort by modification time (newest first)
+        files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        
+        # Keep the 5 most recent files, delete the rest
+        for file_path in files[keep_files:]:
+            try:
+                os.remove(file_path)
+                print(f"Deleted: {file_path}")
+            except FileNotFoundError:
+                # File might have been deleted by another process
+                print(f"File already deleted: {file_path}")
+            except Exception as e:
+                # Log other errors but continue
+                print(f"Error deleting {file_path}: {e}")
+        
+        print(f"Cleanup complete. Kept the {keep_files} most recent audio files.")
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
 
 if __name__ == "__main__":
     clean_wav_files()
