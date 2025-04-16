@@ -64,6 +64,25 @@ if torch.cuda.is_available():
 # Get the model instance
 model = tts.synthesizer.tts_model
 
+# Add this helper function at the top of the script (around line 30):
+def ensure_gpu(model):
+    """
+    Ensures all model operations keep tensors on GPU whenever possible.
+    """
+    def force_cuda_output_hook(module, input, output):
+        if isinstance(output, torch.Tensor) and not output.is_cuda:
+            return output.to(device)
+        return output
+    
+    # Apply recursively to all submodules
+    for module in model.modules():
+        module.register_forward_hook(force_cuda_output_hook)
+    
+    return model
+
+# Then add this line after loading the model (around line 34):
+model = ensure_gpu(tts.synthesizer.tts_model)
+
 # Run standard inference for comparison first
 print("\n--- Running standard inference ---")
 standard_output_path = "outputs/output_standard.wav"
@@ -149,153 +168,300 @@ try:
     
     print("Analyzing XTTS model structure for optimizable components...")
     
-    # Define a specialized ResBlock wrapper that handles dynamic input lengths
-    class DynamicResblockWrapper(torch.nn.Module):
-        def __init__(self, resblock):
-            super().__init__()
-            self.resblock = resblock
-            # Keep track of whether this is TensorRT optimized
-            self.is_tensorrt = False
-            # Create multiple TensorRT engines for different input lengths
-            self.trt_engines = {}
-            self.supported_sizes = []
+    # First identify the actual bottlenecks in the model
+    if hasattr(model, 'hifigan_decoder'):
+        print("Analyzing HiFiGAN decoder structure...")
+        # Create a counter to track layer execution during a test run
+        layer_calls = {}
         
-        def forward(self, x):
-            # Get the current sequence length
-            curr_len = x.size(2)
-            
-            # If we're not using TensorRT or we don't have an engine for this length, use original
-            if not self.is_tensorrt or curr_len not in self.supported_sizes:
-                return self.resblock(x)
-            
-            # Otherwise use the appropriate TensorRT engine
-            engine = self.trt_engines[curr_len]
-            # Ensure input stays on GPU
-            x = x.contiguous()
-            return engine(x)
-    
-    # Try to find all resblocks in the waveform decoder
-    if hasattr(model, 'hifigan_decoder') and hasattr(model.hifigan_decoder, 'waveform_decoder'):
-        waveform_decoder = model.hifigan_decoder.waveform_decoder
+        # Define hooks to monitor the model
+        def layer_hook(name):
+            def hook(module, input, output):
+                if name not in layer_calls:
+                    layer_calls[name] = 1
+                else:
+                    layer_calls[name] += 1
+                if hasattr(input[0], 'shape'):
+                    print(f"Layer {name} received input shape: {input[0].shape}")
+            return hook
         
-        if hasattr(waveform_decoder, 'resblocks'):
-            resblocks = waveform_decoder.resblocks
-            print(f"Found resblocks module with {len(resblocks)} blocks!")
+        # Register hooks on key components
+        hooks = []
+        
+        # Check if we can directly optimize the entire decoder
+        if hasattr(model.hifigan_decoder, 'waveform_decoder'):
+            dec = model.hifigan_decoder.waveform_decoder
             
-            # We'll wrap multiple resblocks with our dynamic wrapper to maximize TensorRT benefit
-            # Try to optimize up to 4 blocks for better performance
-            num_blocks_to_optimize = min(4, len(resblocks))
-            print(f"Will optimize {num_blocks_to_optimize} resblocks with TensorRT")
-
-            optimized_blocks = 0
-            for block_idx in range(num_blocks_to_optimize):
-                print(f"\nSetting up dynamic wrapper for resblock {block_idx}...")
-                wrapper = DynamicResblockWrapper(resblocks[block_idx])
+            # Look at the upsample layers - these are often computationally intensive
+            if hasattr(dec, 'ups'):
+                print(f"Found {len(dec.ups)} upsample layers")
+                for i, layer in enumerate(dec.ups):
+                    hooks.append(layer.register_forward_hook(layer_hook(f"upsample_{i}")))
+            
+            # Look at the main components
+            for name, module in dec.named_children():
+                if name not in ['ups', 'resblocks']:  # Already added these
+                    hooks.append(module.register_forward_hook(layer_hook(name)))
+            
+        # Do a short test inference to gather information
+        print("Running test inference to identify optimization targets...")
+        with torch.no_grad():
+            _ = tts.tts(
+                text="测试一下。",  # Short Chinese test
+                speaker_wav=speaker_wav,
+                language="zh"
+            )
+        
+        # Remove the hooks
+        for hook in hooks:
+            hook.remove()
+        
+        # Print layer execution stats
+        print("\nLayer execution stats from test run:")
+        for name, count in layer_calls.items():
+            print(f"Layer {name}: called {count} times")
+        
+        # Create a specialized wrapper for multi-resolution upsampling layers
+        class TRTUpsampleWrapper(torch.nn.Module):
+            def __init__(self, original_module):
+                super().__init__()
+                self.original = original_module
+                self.trt_engines = {}
+                self.is_tensorrt = False
                 
-                # Define sequence lengths we want to support - focusing on the most common sizes
-                target_sizes = [39, 64, 100, 200, 500]
+            def forward(self, x):
+                in_shape = tuple(x.shape)
                 
-                # Try to create TensorRT engines for different sequence lengths
-                for seq_len in target_sizes:
+                # Use TensorRT if available for this shape
+                if self.is_tensorrt and in_shape in self.trt_engines:
+                    return self.trt_engines[in_shape](x.contiguous())
+                else:
+                    return self.original(x)
+        
+        # Identify and optimize the upsample layers - these are often bottlenecks
+        # in waveform generation and have fixed weights
+        if hasattr(model.hifigan_decoder, 'waveform_decoder') and hasattr(model.hifigan_decoder.waveform_decoder, 'ups'):
+            ups = model.hifigan_decoder.waveform_decoder.ups
+            print(f"\nFound {len(ups)} upsample layers to optimize")
+            
+            # Optimize each upsample layer
+            optimized_ups = 0
+            for i, up_layer in enumerate(ups):
+                print(f"\nOptimizing upsample layer {i}...")
+                wrapper = TRTUpsampleWrapper(up_layer)
+                
+                # Extract the actual sizes we need from the logs
+                if i == 2:  # For upsample layer 2 which successfully compiles
+                    test_sizes = [
+                        (1, 128, 24768),  # Seen in logs
+                        (1, 128, 25600),  # Seen in logs
+                        (1, 128, 27264),  # Seen in logs
+                        (1, 128, 28416),  # Seen in logs
+                        (1, 128, 30336),  # Seen in logs
+                        (1, 128, 31744),  # Seen in logs
+                        (1, 128, 35904),  # Seen in logs
+                        (1, 128, 38144),  # Seen in logs
+                        (1, 128, 39552),  # Seen in logs
+                        (1, 128, 40064),  # Seen in logs
+                        (1, 128, 40384),  # Seen in logs
+                        (1, 128, 42880),  # Seen in logs
+                        (1, 128, 44800),  # Seen in logs
+                        (1, 128, 45120),  # Seen in logs
+                    ]
+                else:
+                    test_sizes = [
+                        (1, 128, 20000),  # Base size
+                        (1, 128, 30000),  # Medium size
+                        (1, 128, 40000),  # Large size
+                    ]
+                
+                for in_size in test_sizes:
                     try:
-                        print(f"Creating TensorRT engine for sequence length {seq_len}...")
-                        dummy_input = torch.randn(1, 256, seq_len, device=device)
+                        print(f"Creating TensorRT engine for input shape: {in_size}...")
+                        dummy_input = torch.randn(in_size, device=device)
                         
-                        # Test if the original resblock works with this size
+                        # Test the original layer
                         with torch.no_grad():
-                            # Make sure everything stays on GPU
                             dummy_input = dummy_input.contiguous()
-                            original_output = resblocks[block_idx](dummy_input)
-                            print(f"Original resblock works with size {seq_len}, output shape: {original_output.shape}")
+                            original_output = up_layer(dummy_input)
+                            print(f"Original output shape: {original_output.shape}")
                         
-                        # Create TensorRT engine with properly configured dynamic shape support
+                        # Compile with TensorRT with dynamic shape handling
                         compile_spec = {
                             "inputs": [dummy_input],
-                            "enabled_precisions": {torch.float32},  # FP32 for better accuracy
-                            "workspace_size": 1 << 28,
-                            "debug": False,  # Turn off debug mode for better performance
-                            "min_block_size": 1
+                            "enabled_precisions": {torch.float32},  # FP32 only for stability
+                            "workspace_size": 1 << 30,  # 1GB workspace
+                            "debug": False,
+                            # Allow for more variation in sequence length
+                            "input_shapes": {
+                                "x": {
+                                    "min": [in_size[0], in_size[1], max(1, int(in_size[2] * 0.7))], 
+                                    "opt": [in_size[0], in_size[1], in_size[2]],
+                                    "max": [in_size[0], in_size[1], int(in_size[2] * 1.3)]
+                                }
+                            }
                         }
                         
-                        # Compile with TensorRT
                         compiled_module = torch_tensorrt.compile(
-                            resblocks[block_idx],
+                            up_layer, 
                             **compile_spec
                         )
                         
                         # Test the compiled module
                         with torch.no_grad():
-                            # Ensure input stays on CUDA
-                            dummy_input = dummy_input.contiguous()
                             trt_output = compiled_module(dummy_input)
-                            print(f"TensorRT output for size {seq_len}, shape: {trt_output.shape}")
+                            print(f"TensorRT output shape: {trt_output.shape}")
                             
-                            # Compare outputs
+                            # Compare the outputs
                             diff = torch.abs(original_output - trt_output).mean().item()
-                            print(f"Mean difference for size {seq_len}: {diff}")
+                            print(f"Mean difference: {diff}")
                         
-                        # Add this engine to our wrapper
-                        wrapper.trt_engines[seq_len] = compiled_module
-                        wrapper.supported_sizes.append(seq_len)
+                        # Store the TensorRT engine
+                        wrapper.trt_engines[in_size] = compiled_module
                         wrapper.is_tensorrt = True
-                    
                     except Exception as e:
-                        print(f"Failed to create engine for size {seq_len}: {e}")
+                        print(f"Failed to create engine for size {in_size}: {e}")
                 
-                # If we successfully created any engines, replace the original resblock
-                if wrapper.is_tensorrt and wrapper.supported_sizes:
-                    print(f"Successfully created TensorRT engines for sizes: {wrapper.supported_sizes}")
-                    print(f"Replacing original resblock {block_idx} with dynamic TensorRT wrapper")
-                    resblocks[block_idx] = wrapper
-                    optimized_blocks += 1
+                # Replace the original layer if optimization was successful
+                if wrapper.is_tensorrt:
+                    print(f"Successfully created TensorRT engines for upsample layer {i}")
+                    ups[i] = wrapper
+                    optimized_ups += 1
                 else:
-                    print(f"Failed to create any working TensorRT engines for resblock {block_idx}")
-
-            print(f"TensorRT optimization applied to {optimized_blocks} resblocks")
-
-            # Create a counter class to track TensorRT activations during inference
-            if optimized_blocks > 0:
-                class TensorRTCounter:
-                    def __init__(self):
-                        self.hits = 0
-                        self.misses = 0
+                    print(f"Failed to optimize upsample layer {i}")
+            
+            print(f"Successfully optimized {optimized_ups} of {len(ups)} upsample layers")
+            
+            # Now try to optimize the conv_post layer
+            # This is usually a significant bottleneck as it generates the final waveform
+            if hasattr(model.hifigan_decoder.waveform_decoder, 'conv_post'):
+                print("\nOptimizing conv_post layer...")
+                conv_post = model.hifigan_decoder.waveform_decoder.conv_post
+                wrapper = TRTUpsampleWrapper(conv_post)
+                
+                # Define test sizes based on typical output sizes of upsample layers
+                # These would be much larger because of the upsampling
+                test_sizes = [
+                    (1, 128, 30000),
+                    (1, 128, 60000),
+                    (1, 128, 120000)
+                ]
+                
+                for in_size in test_sizes:
+                    try:
+                        print(f"Creating TensorRT engine for conv_post with input shape: {in_size}...")
+                        dummy_input = torch.randn(in_size, device=device)
+                        
+                        # Test the original layer
+                        with torch.no_grad():
+                            dummy_input = dummy_input.contiguous()
+                            original_output = conv_post(dummy_input)
+                            print(f"Original output shape: {original_output.shape}")
+                        
+                        # Compile with TensorRT - allow dynamic sequence length
+                        compile_spec = {
+                            "inputs": [dummy_input],
+                            "enabled_precisions": {torch.float32},  # FP32 only for stability
+                            "workspace_size": 1 << 30,  # 1GB workspace
+                            "debug": False,
+                            # Allow varied lengths
+                            "input_shapes": {
+                                "x": {
+                                    "min": [in_size[0], in_size[1], max(1, int(in_size[2] * 0.8))], 
+                                    "opt": [in_size[0], in_size[1], in_size[2]],
+                                    "max": [in_size[0], in_size[1], int(in_size[2] * 1.2)]
+                                }
+                            }
+                        }
+                        
+                        compiled_module = torch_tensorrt.compile(
+                            conv_post, 
+                            **compile_spec
+                        )
+                        
+                        # Test the compiled module
+                        with torch.no_grad():
+                            trt_output = compiled_module(dummy_input)
+                            print(f"TensorRT output shape: {trt_output.shape}")
+                            
+                            # Compare the outputs
+                            diff = torch.abs(original_output - trt_output).mean().item()
+                            print(f"Mean difference: {diff}")
+                        
+                        # Store the TensorRT engine
+                        wrapper.trt_engines[in_size] = compiled_module
+                        wrapper.is_tensorrt = True
+                    except Exception as e:
+                        print(f"Failed to create engine for size {in_size}: {e}")
+                
+                # Replace the original layer if optimization was successful
+                if wrapper.is_tensorrt:
+                    print("Successfully created TensorRT engines for conv_post layer")
+                    model.hifigan_decoder.waveform_decoder.conv_post = wrapper
+                    optimized_ups += 1
+                else:
+                    print("Failed to optimize conv_post layer")
                     
-                    def reset(self):
-                        self.hits = 0
-                        self.misses = 0
+            # Create a counter to track TensorRT activations
+            class TensorRTCounter:
+                def __init__(self):
+                    self.hits = 0
+                    self.misses = 0
+                    self.last_shapes = []
                 
-                # Create a counter instance
-                trt_counter = TensorRTCounter()
-                
-                # Set up a hook to count TensorRT activations
-                def tensorrt_counter_hook(module, input, output):
-                    if isinstance(module, DynamicResblockWrapper):
-                        curr_len = input[0].size(2)
-                        if module.is_tensorrt and curr_len in module.supported_sizes:
+                def reset(self):
+                    self.hits = 0
+                    self.misses = 0
+                    self.last_shapes = []
+            
+            # Create counter instance
+            trt_counter = TensorRTCounter()
+            
+            # Set up a hook to count TensorRT usage and track shapes
+            def tensorrt_counter_hook(name):
+                def hook_fn(module, input, output):
+                    in_shape = tuple(input[0].shape)
+                    trt_counter.last_shapes.append((name, in_shape))
+                    
+                    if hasattr(module, 'is_tensorrt') and module.is_tensorrt:
+                        if in_shape in module.trt_engines:
                             trt_counter.hits += 1
                         else:
                             trt_counter.misses += 1
+                            # Print the shape that wasn't found in engines
+                            print(f"TensorRT miss for {name} with shape {in_shape}")
                 
-                # Register hooks on all optimized resblocks
-                hooks = []
-                for i in range(len(resblocks)):
-                    if isinstance(resblocks[i], DynamicResblockWrapper) and resblocks[i].is_tensorrt:
-                        hooks.append(resblocks[i].register_forward_hook(tensorrt_counter_hook))
+                return hook_fn
+            
+            # Register hooks on all optimized modules
+            hooks = []
+            if hasattr(model.hifigan_decoder, 'waveform_decoder'):
+                dec = model.hifigan_decoder.waveform_decoder
+                if hasattr(dec, 'ups'):
+                    for i, layer in enumerate(dec.ups):
+                        if hasattr(layer, 'is_tensorrt') and layer.is_tensorrt:
+                            hooks.append(layer.register_forward_hook(tensorrt_counter_hook(f"upsample_{i}")))
                 
-                print(f"Registered TensorRT usage monitors on {len(hooks)} optimized resblocks")
+                if hasattr(dec, 'conv_post') and hasattr(dec.conv_post, 'is_tensorrt') and dec.conv_post.is_tensorrt:
+                    hooks.append(dec.conv_post.register_forward_hook(tensorrt_counter_hook("conv_post")))
+            
+            # Print stats function
+            def print_tensorrt_stats():
+                print(f"TensorRT usage stats: {trt_counter.hits} hits, {trt_counter.misses} misses")
+                if trt_counter.hits + trt_counter.misses > 0:
+                    hit_rate = trt_counter.hits / (trt_counter.hits + trt_counter.misses) * 100
+                    print(f"Hit rate: {hit_rate:.1f}%")
+                
+                # Reset counters
+                trt_counter.reset()
 
-                # We'll print TensorRT usage stats after each inference run
-                def print_tensorrt_stats():
-                    if trt_counter.hits + trt_counter.misses > 0:
-                        hit_rate = trt_counter.hits / (trt_counter.hits + trt_counter.misses) * 100
-                        print(f"TensorRT usage stats: {trt_counter.hits} hits, {trt_counter.misses} misses ({hit_rate:.1f}% hit rate)")
-                        # Reset counters for next run
-                        trt_counter.reset()
-        else:
-            print("Could not find resblocks in waveform_decoder")
+        print("\nBased on TensorRT misses during test inference, we need to create engines for:")
+        for shape in trt_counter.last_shapes:
+            print(f"- {shape[0]} with shape {shape[1]}")
+        print("Consider updating the test_sizes to include these shapes for better hit rate.")
+
     else:
-        print("Could not find waveform_decoder in hifigan_decoder")
-    
+        print("Could not find HiFiGAN decoder structure")
 except Exception as e:
     print(f"Error during TensorRT optimization: {e}")
     print("Continuing with previously optimized model")
@@ -355,7 +521,7 @@ for i in range(num_runs):
         torch.cuda.empty_cache()
         
     start_time = time.time()
-    with torch.no_grad():  # Ensure we use no_grad for inference
+    with torch.no_grad():  # Use no_grad but NOT autocast for the whole pipeline
         tts.tts_to_file(
             text=chinese_text,
             file_path=f"outputs/output_optimized_trt_{i+1}.wav",
@@ -373,6 +539,104 @@ for i in range(num_runs):
 avg_optimized_time_trt = total_time_trt / num_runs
 speedup_trt = standard_time / avg_optimized_time_trt if avg_optimized_time_trt > 0 else 0
 
+# Add a special approach that only applies FP16 to the HiFiGAN decoder (not the GPT part)
+print("\nApproach 3: Selective FP16 for vocoder only")
+total_time_selective = 0
+
+# Create patched versions of the functions that need acceleration
+if hasattr(model, 'hifigan_decoder'):
+    # Save original forward method
+    original_forward = model.hifigan_decoder.forward
+    
+    # Create an FP16-accelerated version that handles all parameters
+    def fp16_forward(self, mel_tensor, g=None):
+        # Use the new recommended syntax
+        with torch.amp.autocast(device_type='cuda', enabled=True):
+            return original_forward(mel_tensor, g=g)
+    
+    # Apply the patch
+    import types
+    model.hifigan_decoder.forward = types.MethodType(fp16_forward, model.hifigan_decoder)
+    print("Applied selective FP16 acceleration to HiFiGAN decoder")
+
+for i in range(num_runs):
+    # Clear CUDA cache before each run
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
+    start_time = time.time()
+    with torch.no_grad():  # Keep using no_grad globally
+        tts.tts_to_file(
+            text=chinese_text,
+            file_path=f"outputs/output_optimized_selective_{i+1}.wav",
+            speaker_wav=speaker_wav,
+            language=language
+        )
+    run_time = time.time() - start_time
+    total_time_selective += run_time
+    print(f"Run {i+1}: {run_time:.4f} seconds")
+
+    # Add after the tts_to_file calls in both benchmark sections
+    if 'print_tensorrt_stats' in globals():
+        print_tensorrt_stats()
+
+avg_optimized_time_selective = total_time_selective / num_runs
+speedup_selective = standard_time / avg_optimized_time_selective if avg_optimized_time_selective > 0 else 0
+
+# Add a new approach after the Selective FP16 section (around line 560):
+
+# Add a special approach that uses TF32 for vocoder (works better on Ampere GPUs)
+print("\nApproach 4: Selective TF32 for vocoder only")
+total_time_tf32 = 0
+
+# Create TF32-accelerated version
+if hasattr(model, 'hifigan_decoder'):
+    # Save original forward method
+    original_forward_tf32 = model.hifigan_decoder.forward
+    
+    # Create a TF32-accelerated version that handles all parameters
+    def tf32_forward(self, mel_tensor, g=None):
+        # Only apply TF32 to this part
+        with torch.no_grad():
+            # Enable TF32 locally
+            old_tf32 = torch.backends.cuda.matmul.allow_tf32
+            torch.backends.cuda.matmul.allow_tf32 = True
+            
+            result = original_forward_tf32(mel_tensor, g=g)
+            
+            # Restore previous setting
+            torch.backends.cuda.matmul.allow_tf32 = old_tf32
+            return result
+    
+    # Apply the patch
+    import types
+    model.hifigan_decoder.forward = types.MethodType(tf32_forward, model.hifigan_decoder)
+    print("Applied selective TF32 acceleration to HiFiGAN decoder")
+
+for i in range(num_runs):
+    # Clear CUDA cache before each run
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
+    start_time = time.time()
+    with torch.no_grad():  # Keep using no_grad globally
+        tts.tts_to_file(
+            text=chinese_text,
+            file_path=f"outputs/output_optimized_tf32_{i+1}.wav",
+            speaker_wav=speaker_wav,
+            language=language
+        )
+    run_time = time.time() - start_time
+    total_time_tf32 += run_time
+    print(f"Run {i+1}: {run_time:.4f} seconds")
+
+    # Add after the tts_to_file calls in both benchmark sections
+    if 'print_tensorrt_stats' in globals():
+        print_tensorrt_stats()
+
+avg_optimized_time_tf32 = total_time_tf32 / num_runs
+speedup_tf32 = standard_time / avg_optimized_time_tf32 if avg_optimized_time_tf32 > 0 else 0
+
 # Determine the best approach
 best_approach = "Standard"
 best_time = standard_time
@@ -388,6 +652,16 @@ if avg_optimized_time_trt > 0 and avg_optimized_time_trt < best_time:
     best_time = avg_optimized_time_trt
     best_speedup = speedup_trt
 
+if avg_optimized_time_selective > 0 and avg_optimized_time_selective < best_time:
+    best_approach = "Approach 3 (Selective FP16)"
+    best_time = avg_optimized_time_selective
+    best_speedup = speedup_selective
+
+if avg_optimized_time_tf32 > 0 and avg_optimized_time_tf32 < best_time:
+    best_approach = "Approach 4 (Selective TF32)"
+    best_time = avg_optimized_time_tf32
+    best_speedup = speedup_tf32
+
 # Print summary
 print("\n--- Performance Summary ---")
 print(f"Chinese text: \"{chinese_text}\"")
@@ -396,6 +670,10 @@ if avg_optimized_time_approach1 > 0:
     print(f"Approach 1 (GPU Optimizations): {avg_optimized_time_approach1:.4f} seconds (Speedup: {speedup_approach1:.2f}x)")
 if avg_optimized_time_trt > 0:
     print(f"Approach 2 (PyTorch-TensorRT): {avg_optimized_time_trt:.4f} seconds (Speedup: {speedup_trt:.2f}x)")
+if avg_optimized_time_selective > 0:
+    print(f"Approach 3 (Selective FP16): {avg_optimized_time_selective:.4f} seconds (Speedup: {speedup_selective:.2f}x)")
+if avg_optimized_time_tf32 > 0:
+    print(f"Approach 4 (Selective TF32): {avg_optimized_time_tf32:.4f} seconds (Speedup: {speedup_tf32:.2f}x)")
 print(f"\nBest approach: {best_approach} - {best_time:.4f} seconds (Speedup: {best_speedup:.2f}x)")
 print(f"Standard output: {standard_output_path}")
 print(f"Optimized outputs: outputs/output_optimized_*")
@@ -408,3 +686,9 @@ print("1. Look for 'Successfully created TensorRT engines' messages in the outpu
 print("2. Check for the 'Mean difference' values which indicate TensorRT outputs are being compared")
 print("3. Monitor GPU utilization with 'nvidia-smi' in another terminal during inference")
 print("4. The speedup reported in the performance summary should show improvement\n")
+
+# Restore original methods
+if hasattr(model, 'hifigan_decoder') and 'original_forward' in locals():
+    import types
+    model.hifigan_decoder.forward = types.MethodType(original_forward, model.hifigan_decoder)
+    print("Restored original HiFiGAN decoder forward method")
