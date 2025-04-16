@@ -24,7 +24,7 @@ if not os.path.exists(speaker_wav):
     print(f"Error: Speaker file {speaker_wav} not found!")
     exit(1)
 
-chinese_text = "他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。"
+chinese_text = "青石板上泛着水光，雨丝斜斜地织着帘子。我撑一把油纸伞，踩着湿润的石板路，听脚步声在巷子里轻轻回响。"
 language = "zh"
 
 # Run standard inference for comparison first
