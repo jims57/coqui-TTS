@@ -182,69 +182,115 @@ try:
             resblocks = waveform_decoder.resblocks
             print(f"Found resblocks module with {len(resblocks)} blocks!")
             
-            # We'll wrap each resblock with our dynamic wrapper
-            # Just do one resblock for demonstration (the first one)
-            print(f"Setting up dynamic wrapper for resblock 0...")
-            wrapper = DynamicResblockWrapper(resblocks[0])
-            
-            # Define sequence lengths we want to support - focusing on the most common sizes
-            target_sizes = [39, 64, 100, 200, 500, 1000, 1500]
-            
-            # Try to create TensorRT engines for different sequence lengths
-            for seq_len in target_sizes:
-                try:
-                    print(f"Creating TensorRT engine for sequence length {seq_len}...")
-                    dummy_input = torch.randn(1, 256, seq_len, device=device)
-                    
-                    # Test if the original resblock works with this size
-                    with torch.no_grad():
-                        # Make sure everything stays on GPU
-                        dummy_input = dummy_input.contiguous()
-                        original_output = resblocks[0](dummy_input)
-                        print(f"Original resblock works with size {seq_len}, output shape: {original_output.shape}")
-                    
-                    # Create TensorRT engine with properly configured dynamic shape support
-                    compile_spec = {
-                        "inputs": [dummy_input],
-                        "enabled_precisions": {torch.float32},  # FP32 for better accuracy
-                        "workspace_size": 1 << 28,
-                        "debug": False,  # Turn off debug mode for better performance
-                        "min_block_size": 1
-                    }
-                    
-                    # Compile with TensorRT
-                    compiled_module = torch_tensorrt.compile(
-                        resblocks[0],
-                        **compile_spec
-                    )
-                    
-                    # Test the compiled module
-                    with torch.no_grad():
-                        # Ensure input stays on CUDA
-                        dummy_input = dummy_input.contiguous()
-                        trt_output = compiled_module(dummy_input)
-                        print(f"TensorRT output for size {seq_len}, shape: {trt_output.shape}")
-                        
-                        # Compare outputs
-                        diff = torch.abs(original_output - trt_output).mean().item()
-                        print(f"Mean difference for size {seq_len}: {diff}")
-                    
-                    # Add this engine to our wrapper
-                    wrapper.trt_engines[seq_len] = compiled_module
-                    wrapper.supported_sizes.append(seq_len)
-                    wrapper.is_tensorrt = True
+            # We'll wrap multiple resblocks with our dynamic wrapper to maximize TensorRT benefit
+            # Try to optimize up to 4 blocks for better performance
+            num_blocks_to_optimize = min(4, len(resblocks))
+            print(f"Will optimize {num_blocks_to_optimize} resblocks with TensorRT")
+
+            optimized_blocks = 0
+            for block_idx in range(num_blocks_to_optimize):
+                print(f"\nSetting up dynamic wrapper for resblock {block_idx}...")
+                wrapper = DynamicResblockWrapper(resblocks[block_idx])
                 
-                except Exception as e:
-                    print(f"Failed to create engine for size {seq_len}: {e}")
-            
-            # If we successfully created any engines, replace the original resblock
-            if wrapper.is_tensorrt and wrapper.supported_sizes:
-                print(f"Successfully created TensorRT engines for sizes: {wrapper.supported_sizes}")
-                print(f"Replacing original resblock 0 with dynamic TensorRT wrapper")
-                resblocks[0] = wrapper
-                print("TensorRT optimization applied to resblock 0")
-            else:
-                print(f"Failed to create any working TensorRT engines for resblock 0")
+                # Define sequence lengths we want to support - focusing on the most common sizes
+                target_sizes = [39, 64, 100, 200, 500]
+                
+                # Try to create TensorRT engines for different sequence lengths
+                for seq_len in target_sizes:
+                    try:
+                        print(f"Creating TensorRT engine for sequence length {seq_len}...")
+                        dummy_input = torch.randn(1, 256, seq_len, device=device)
+                        
+                        # Test if the original resblock works with this size
+                        with torch.no_grad():
+                            # Make sure everything stays on GPU
+                            dummy_input = dummy_input.contiguous()
+                            original_output = resblocks[block_idx](dummy_input)
+                            print(f"Original resblock works with size {seq_len}, output shape: {original_output.shape}")
+                        
+                        # Create TensorRT engine with properly configured dynamic shape support
+                        compile_spec = {
+                            "inputs": [dummy_input],
+                            "enabled_precisions": {torch.float32},  # FP32 for better accuracy
+                            "workspace_size": 1 << 28,
+                            "debug": False,  # Turn off debug mode for better performance
+                            "min_block_size": 1
+                        }
+                        
+                        # Compile with TensorRT
+                        compiled_module = torch_tensorrt.compile(
+                            resblocks[block_idx],
+                            **compile_spec
+                        )
+                        
+                        # Test the compiled module
+                        with torch.no_grad():
+                            # Ensure input stays on CUDA
+                            dummy_input = dummy_input.contiguous()
+                            trt_output = compiled_module(dummy_input)
+                            print(f"TensorRT output for size {seq_len}, shape: {trt_output.shape}")
+                            
+                            # Compare outputs
+                            diff = torch.abs(original_output - trt_output).mean().item()
+                            print(f"Mean difference for size {seq_len}: {diff}")
+                        
+                        # Add this engine to our wrapper
+                        wrapper.trt_engines[seq_len] = compiled_module
+                        wrapper.supported_sizes.append(seq_len)
+                        wrapper.is_tensorrt = True
+                    
+                    except Exception as e:
+                        print(f"Failed to create engine for size {seq_len}: {e}")
+                
+                # If we successfully created any engines, replace the original resblock
+                if wrapper.is_tensorrt and wrapper.supported_sizes:
+                    print(f"Successfully created TensorRT engines for sizes: {wrapper.supported_sizes}")
+                    print(f"Replacing original resblock {block_idx} with dynamic TensorRT wrapper")
+                    resblocks[block_idx] = wrapper
+                    optimized_blocks += 1
+                else:
+                    print(f"Failed to create any working TensorRT engines for resblock {block_idx}")
+
+            print(f"TensorRT optimization applied to {optimized_blocks} resblocks")
+
+            # Create a counter class to track TensorRT activations during inference
+            if optimized_blocks > 0:
+                class TensorRTCounter:
+                    def __init__(self):
+                        self.hits = 0
+                        self.misses = 0
+                    
+                    def reset(self):
+                        self.hits = 0
+                        self.misses = 0
+                
+                # Create a counter instance
+                trt_counter = TensorRTCounter()
+                
+                # Set up a hook to count TensorRT activations
+                def tensorrt_counter_hook(module, input, output):
+                    if isinstance(module, DynamicResblockWrapper):
+                        curr_len = input[0].size(2)
+                        if module.is_tensorrt and curr_len in module.supported_sizes:
+                            trt_counter.hits += 1
+                        else:
+                            trt_counter.misses += 1
+                
+                # Register hooks on all optimized resblocks
+                hooks = []
+                for i in range(len(resblocks)):
+                    if isinstance(resblocks[i], DynamicResblockWrapper) and resblocks[i].is_tensorrt:
+                        hooks.append(resblocks[i].register_forward_hook(tensorrt_counter_hook))
+                
+                print(f"Registered TensorRT usage monitors on {len(hooks)} optimized resblocks")
+
+                # We'll print TensorRT usage stats after each inference run
+                def print_tensorrt_stats():
+                    if trt_counter.hits + trt_counter.misses > 0:
+                        hit_rate = trt_counter.hits / (trt_counter.hits + trt_counter.misses) * 100
+                        print(f"TensorRT usage stats: {trt_counter.hits} hits, {trt_counter.misses} misses ({hit_rate:.1f}% hit rate)")
+                        # Reset counters for next run
+                        trt_counter.reset()
         else:
             print("Could not find resblocks in waveform_decoder")
     else:
@@ -292,8 +338,40 @@ for i in range(num_runs):
     total_time += run_time
     print(f"Run {i+1}: {run_time:.4f} seconds")
 
+    # Add after the tts_to_file calls in both benchmark sections
+    if 'print_tensorrt_stats' in globals():
+        print_tensorrt_stats()
+
 avg_optimized_time_approach1 = total_time / num_runs
 speedup_approach1 = standard_time / avg_optimized_time_approach1 if avg_optimized_time_approach1 > 0 else 0
+
+# Reset the timer for TensorRT approach
+print("\nApproach 2: Using PyTorch-TensorRT with dynamic shapes")
+total_time_trt = 0
+
+for i in range(num_runs):
+    # Clear CUDA cache before each run
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
+    start_time = time.time()
+    with torch.no_grad():  # Ensure we use no_grad for inference
+        tts.tts_to_file(
+            text=chinese_text,
+            file_path=f"outputs/output_optimized_trt_{i+1}.wav",
+            speaker_wav=speaker_wav,
+            language=language
+        )
+    run_time = time.time() - start_time
+    total_time_trt += run_time
+    print(f"Run {i+1}: {run_time:.4f} seconds")
+
+    # Add after the tts_to_file calls in both benchmark sections
+    if 'print_tensorrt_stats' in globals():
+        print_tensorrt_stats()
+
+avg_optimized_time_trt = total_time_trt / num_runs
+speedup_trt = standard_time / avg_optimized_time_trt if avg_optimized_time_trt > 0 else 0
 
 # Determine the best approach
 best_approach = "Standard"
@@ -301,16 +379,23 @@ best_time = standard_time
 best_speedup = 1.0
 
 if avg_optimized_time_approach1 > 0 and avg_optimized_time_approach1 < best_time:
-    best_approach = "Approach 1 (TensorRT + GPU Optimizations)"
+    best_approach = "Approach 1 (GPU Optimizations)"
     best_time = avg_optimized_time_approach1
     best_speedup = speedup_approach1
+
+if avg_optimized_time_trt > 0 and avg_optimized_time_trt < best_time:
+    best_approach = "Approach 2 (PyTorch-TensorRT)"
+    best_time = avg_optimized_time_trt
+    best_speedup = speedup_trt
 
 # Print summary
 print("\n--- Performance Summary ---")
 print(f"Chinese text: \"{chinese_text}\"")
 print(f"Standard inference: {standard_time:.4f} seconds")
 if avg_optimized_time_approach1 > 0:
-    print(f"Approach 1 (TensorRT + GPU Optimizations): {avg_optimized_time_approach1:.4f} seconds (Speedup: {speedup_approach1:.2f}x)")
+    print(f"Approach 1 (GPU Optimizations): {avg_optimized_time_approach1:.4f} seconds (Speedup: {speedup_approach1:.2f}x)")
+if avg_optimized_time_trt > 0:
+    print(f"Approach 2 (PyTorch-TensorRT): {avg_optimized_time_trt:.4f} seconds (Speedup: {speedup_trt:.2f}x)")
 print(f"\nBest approach: {best_approach} - {best_time:.4f} seconds (Speedup: {best_speedup:.2f}x)")
 print(f"Standard output: {standard_output_path}")
 print(f"Optimized outputs: outputs/output_optimized_*")
