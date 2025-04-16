@@ -345,12 +345,28 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Find API key in headers (case-insensitive)
         api_key = None
+        language = "en"  # Default language
+        audio_format = "opus"  # Default audio format
+        
         for key, value in headers.items():
-            if key.lower() == API_KEY_NAME.lower():
+            key_lower = key.lower()
+            if key_lower == API_KEY_NAME.lower():
                 api_key = value
-                break
+            elif key_lower == "language":
+                language = value.lower()
+            elif key_lower == "audioformat":
+                audio_format = value.lower()
                 
         print(f"API key extracted from headers: {api_key}")
+        print(f"Language parameter from headers: {language}")
+        print(f"Audio format parameter from headers: {audio_format}")
+        
+        # Validate audio format
+        if audio_format not in ["wav", "opus"]:
+            error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
+            await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
+            await websocket.close(1008)
+            return
         
         # Check if the API key is valid
         if not api_key or api_key not in API_KEYS:
@@ -362,6 +378,16 @@ async def websocket_endpoint(websocket: WebSocket):
             
         print(f"Valid API key from user: {API_KEYS[api_key]['user']}")
         
+        # Validate language
+        if language != "en" and language not in SUPPORTED_LANGUAGES:
+            error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
+            await websocket.send_json({
+                "errorCode": error["errorCode"], 
+                "message": f"{error['message']}: {language}"
+            })
+            await websocket.close(1008)
+            return
+            
         while True:
             # Receive message as JSON
             data = await websocket.receive_text()
@@ -369,10 +395,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Try to parse as JSON
                 message = json.loads(data)
                 text = message.get("text", "")
-                language = message.get("language", "en")
-                audio_format = message.get("audioFormat", "opus").lower()
+                # If language is provided in message, it overrides the header
+                message_language = message.get("language")
+                if message_language:
+                    language = message_language.lower()
+                # If audioFormat is provided in message, it overrides the header
+                message_audio_format = message.get("audioFormat")
+                if message_audio_format:
+                    audio_format = message_audio_format.lower()
                 
-                # Validate audio format
+                # Validate audio format again in case it was changed in the message
                 if audio_format not in ["wav", "opus"]:
                     error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
                     await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
@@ -380,8 +412,6 @@ async def websocket_endpoint(websocket: WebSocket):
             except json.JSONDecodeError:
                 # If not JSON, assume it's just text
                 text = data
-                language = "en"
-                audio_format = "opus"
             
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
@@ -389,8 +419,7 @@ async def websocket_endpoint(websocket: WebSocket):
             print(f"Processing text: {text} with language: {language}, format: {audio_format}")
             
             try:
-                # Validate language first
-                language = language.lower() if language else "en"
+                # Validate language again in case it was changed in the message
                 if language != "en" and language not in SUPPORTED_LANGUAGES:
                     error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
                     await websocket.send_json({
