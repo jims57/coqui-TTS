@@ -163,305 +163,260 @@ try:
     import torch_tensorrt
     print(f"Using PyTorch-TensorRT version: {torch_tensorrt.__version__}")
     
-    # Since the previous TensorRT optimization had issues with dynamic input shapes,
-    # we'll create an approach that specifically handles dynamic dimensions
+    # Since the previous optimization had issues with dynamic input shapes and channel mismatches,
+    # we'll focus on a different approach that targets entire modules instead of individual layers
     
     print("Analyzing XTTS model structure for optimizable components...")
     
-    # First identify the actual bottlenecks in the model
+    # Track the most common input shapes to target for optimization
+    input_shape_tracker = {}
+    
+    # Define a hook to capture input shapes during inference
+    def capture_shapes_hook(name):
+        def hook_fn(module, input, output):
+            shape = input[0].shape if isinstance(input, tuple) and len(input) > 0 else None
+            if shape:
+                if name not in input_shape_tracker:
+                    input_shape_tracker[name] = []
+                input_shape_tracker[name].append(shape)
+        return hook_fn
+    
+    # Register hooks for shape tracking
+    hooks = []
+    
+    # We'll focus on optimizing the entire HiFiGAN decoder which is the most computationally intensive part
     if hasattr(model, 'hifigan_decoder'):
-        print("Analyzing HiFiGAN decoder structure...")
-        # Create a counter to track layer execution during a test run
-        layer_calls = {}
+        print("Targeting HiFiGAN decoder for optimization")
         
-        # Define hooks to monitor the model
-        def layer_hook(name):
-            def hook(module, input, output):
-                if name not in layer_calls:
-                    layer_calls[name] = 1
-                else:
-                    layer_calls[name] += 1
-                if hasattr(input[0], 'shape'):
-                    print(f"Layer {name} received input shape: {input[0].shape}")
-            return hook
+        # Register hook on the decoder itself to capture input shapes
+        hooks.append(model.hifigan_decoder.register_forward_hook(capture_shapes_hook('hifigan_decoder')))
         
-        # Register hooks on key components
-        hooks = []
-        
-        # Check if we can directly optimize the entire decoder
+        # If we can access the waveform_decoder directly, we'll also track its inputs
         if hasattr(model.hifigan_decoder, 'waveform_decoder'):
-            dec = model.hifigan_decoder.waveform_decoder
-            
-            # Look at the upsample layers - these are often computationally intensive
-            if hasattr(dec, 'ups'):
-                print(f"Found {len(dec.ups)} upsample layers")
-                for i, layer in enumerate(dec.ups):
-                    hooks.append(layer.register_forward_hook(layer_hook(f"upsample_{i}")))
-            
-            # Look at the main components
-            for name, module in dec.named_children():
-                if name not in ['ups', 'resblocks']:  # Already added these
-                    hooks.append(module.register_forward_hook(layer_hook(name)))
-            
-        # Do a short test inference to gather information
-        print("Running test inference to identify optimization targets...")
-        with torch.no_grad():
-            _ = tts.tts(
-                text="测试一下。",  # Short Chinese test
-                speaker_wav=speaker_wav,
-                language="zh"
-            )
+            hooks.append(model.hifigan_decoder.waveform_decoder.register_forward_hook(
+                capture_shapes_hook('waveform_decoder')))
+    
+    # Do a short inference to gather input shapes
+    print("Running test inference to gather input shapes...")
+    with torch.no_grad():
+        _ = tts.tts(
+            text="测试一下。这是一个稍长的句子，以便更好地分析模型的输入形状。",  # Longer test sentence
+            speaker_wav=speaker_wav,
+            language="zh"
+        )
+    
+    # Also run a second test with different text to capture more shape variations
+    with torch.no_grad():
+        _ = tts.tts(
+            text="Another test with English to get different shapes.",
+            speaker_wav=speaker_wav,
+            language="en"
+        )
+    
+    # Remove the hooks
+    for hook in hooks:
+        hook.remove()
+    
+    # Print captured input shapes
+    print("\nCaptured input shapes:")
+    for name, shapes in input_shape_tracker.items():
+        print(f"{name} input shapes: {shapes}")
+    
+    # Create a TensorRT module wrapper
+    class TensorRTModuleWrapper(torch.nn.Module):
+        def __init__(self, original_module, name, typical_shapes=None):
+            super().__init__()
+            self.original_module = original_module
+            self.name = name
+            self.trt_engines = {}
+            self.typical_shapes = typical_shapes or []
+            self.is_tensorrt = False
+            self.hits = 0
+            self.misses = 0
         
-        # Remove the hooks
-        for hook in hooks:
-            hook.remove()
-        
-        # Print layer execution stats
-        print("\nLayer execution stats from test run:")
-        for name, count in layer_calls.items():
-            print(f"Layer {name}: called {count} times")
-        
-        # Create a specialized wrapper for multi-resolution upsampling layers
-        class TRTUpsampleWrapper(torch.nn.Module):
-            def __init__(self, original_module):
-                super().__init__()
-                self.original = original_module
-                self.trt_engines = {}
-                self.is_tensorrt = False
+        def forward(self, *args, **kwargs):
+            # Check if we have a TensorRT engine for this input shape
+            if args and isinstance(args[0], torch.Tensor):
+                x = args[0]
+                shape_key = tuple(x.shape)
                 
-            def forward(self, x):
-                in_shape = tuple(x.shape)
-                
-                # Use TensorRT if available for this shape
-                if self.is_tensorrt and in_shape in self.trt_engines:
-                    return self.trt_engines[in_shape](x.contiguous())
+                # If we have an engine for this shape, use it
+                if self.is_tensorrt and shape_key in self.trt_engines:
+                    self.hits += 1
+                    # Make sure input is contiguous and on correct device
+                    x_cont = x.contiguous()
+                    # Use the TensorRT engine
+                    if len(args) > 1:
+                        # Handle case where there are multiple inputs
+                        result = self.trt_engines[shape_key](x_cont, *args[1:], **kwargs)
+                    else:
+                        result = self.trt_engines[shape_key](x_cont, **kwargs)
+                    return result
                 else:
-                    return self.original(x)
+                    self.misses += 1
+                    # Fall back to original module
+                    return self.original_module(*args, **kwargs)
+            else:
+                # Fall back to original module if no tensor input
+                self.misses += 1
+                return self.original_module(*args, **kwargs)
         
-        # Identify and optimize the upsample layers - these are often bottlenecks
-        # in waveform generation and have fixed weights
-        if hasattr(model.hifigan_decoder, 'waveform_decoder') and hasattr(model.hifigan_decoder.waveform_decoder, 'ups'):
-            ups = model.hifigan_decoder.waveform_decoder.ups
-            print(f"\nFound {len(ups)} upsample layers to optimize")
-            
-            # Optimize each upsample layer
-            optimized_ups = 0
-            for i, up_layer in enumerate(ups):
-                print(f"\nOptimizing upsample layer {i}...")
-                wrapper = TRTUpsampleWrapper(up_layer)
-                
-                # Extract the actual sizes we need from the logs
-                if i == 2:  # For upsample layer 2 which successfully compiles
-                    test_sizes = [
-                        (1, 128, 24768),  # Seen in logs
-                        (1, 128, 25600),  # Seen in logs
-                        (1, 128, 27264),  # Seen in logs
-                        (1, 128, 28416),  # Seen in logs
-                        (1, 128, 30336),  # Seen in logs
-                        (1, 128, 31744),  # Seen in logs
-                        (1, 128, 35904),  # Seen in logs
-                        (1, 128, 38144),  # Seen in logs
-                        (1, 128, 39552),  # Seen in logs
-                        (1, 128, 40064),  # Seen in logs
-                        (1, 128, 40384),  # Seen in logs
-                        (1, 128, 42880),  # Seen in logs
-                        (1, 128, 44800),  # Seen in logs
-                        (1, 128, 45120),  # Seen in logs
-                    ]
-                else:
-                    test_sizes = [
-                        (1, 128, 20000),  # Base size
-                        (1, 128, 30000),  # Medium size
-                        (1, 128, 40000),  # Large size
-                    ]
-                
-                for in_size in test_sizes:
-                    try:
-                        print(f"Creating TensorRT engine for input shape: {in_size}...")
-                        dummy_input = torch.randn(in_size, device=device)
-                        
-                        # Test the original layer
-                        with torch.no_grad():
-                            dummy_input = dummy_input.contiguous()
-                            original_output = up_layer(dummy_input)
-                            print(f"Original output shape: {original_output.shape}")
-                        
-                        # Compile with TensorRT with dynamic shape handling
-                        compile_spec = {
-                            "inputs": [dummy_input],
-                            "enabled_precisions": {torch.float32},  # FP32 only for stability
-                            "workspace_size": 1 << 30,  # 1GB workspace
-                            "debug": False,
-                            # Allow for more variation in sequence length
-                            "input_shapes": {
-                                "x": {
-                                    "min": [in_size[0], in_size[1], max(1, int(in_size[2] * 0.7))], 
-                                    "opt": [in_size[0], in_size[1], in_size[2]],
-                                    "max": [in_size[0], in_size[1], int(in_size[2] * 1.3)]
-                                }
-                            }
-                        }
-                        
-                        compiled_module = torch_tensorrt.compile(
-                            up_layer, 
-                            **compile_spec
-                        )
-                        
-                        # Test the compiled module
-                        with torch.no_grad():
-                            trt_output = compiled_module(dummy_input)
-                            print(f"TensorRT output shape: {trt_output.shape}")
-                            
-                            # Compare the outputs
-                            diff = torch.abs(original_output - trt_output).mean().item()
-                            print(f"Mean difference: {diff}")
-                        
-                        # Store the TensorRT engine
-                        wrapper.trt_engines[in_size] = compiled_module
-                        wrapper.is_tensorrt = True
-                    except Exception as e:
-                        print(f"Failed to create engine for size {in_size}: {e}")
-                
-                # Replace the original layer if optimization was successful
-                if wrapper.is_tensorrt:
-                    print(f"Successfully created TensorRT engines for upsample layer {i}")
-                    ups[i] = wrapper
-                    optimized_ups += 1
-                else:
-                    print(f"Failed to optimize upsample layer {i}")
-            
-            print(f"Successfully optimized {optimized_ups} of {len(ups)} upsample layers")
-            
-            # Now try to optimize the conv_post layer
-            # This is usually a significant bottleneck as it generates the final waveform
-            if hasattr(model.hifigan_decoder.waveform_decoder, 'conv_post'):
-                print("\nOptimizing conv_post layer...")
-                conv_post = model.hifigan_decoder.waveform_decoder.conv_post
-                wrapper = TRTUpsampleWrapper(conv_post)
-                
-                # Define test sizes based on typical output sizes of upsample layers
-                # These would be much larger because of the upsampling
-                test_sizes = [
-                    (1, 128, 30000),
-                    (1, 128, 60000),
-                    (1, 128, 120000)
+        def print_stats(self):
+            total = self.hits + self.misses
+            hit_rate = (self.hits / total * 100) if total > 0 else 0
+            print(f"{self.name} TensorRT usage: {self.hits} hits, {self.misses} misses ({hit_rate:.1f}% hit rate)")
+    
+    # Set of optimized modules to track
+    optimized_modules = []
+    
+    # Optimize HiFiGAN decoder directly instead of individual layers
+    # This avoids the channel mismatch issues and captures the entire computation
+    if 'hifigan_decoder' in input_shape_tracker and input_shape_tracker['hifigan_decoder']:
+        # Get the most common input shapes seen
+        hifigan_input_shapes = input_shape_tracker['hifigan_decoder']
+        
+        # Create wrapper for the decoder
+        hifigan_wrapper = TensorRTModuleWrapper(
+            model.hifigan_decoder, 
+            "hifigan_decoder",
+            hifigan_input_shapes
+        )
+        
+        # Create a range of shapes for optimization
+        # Focus on the sequence dimension which varies most
+        print("\nOptimizing HiFiGAN decoder for common input shapes...")
+        
+        # Prepare a representative set of shapes
+        shapes_to_optimize = []
+        for shape in hifigan_input_shapes:
+            if len(shape) >= 3:  # Should be at least 3D [batch, channels, seq_len]
+                # Get the sequence length (last dimension)
+                seq_len = shape[-1]
+                # Create variations around this length
+                variations = [
+                    seq_len,
+                    int(seq_len * 0.8),
+                    int(seq_len * 1.2),
+                    int(seq_len * 1.5),
+                    int(seq_len * 2.0)
                 ]
                 
-                for in_size in test_sizes:
-                    try:
-                        print(f"Creating TensorRT engine for conv_post with input shape: {in_size}...")
-                        dummy_input = torch.randn(in_size, device=device)
-                        
-                        # Test the original layer
-                        with torch.no_grad():
-                            dummy_input = dummy_input.contiguous()
-                            original_output = conv_post(dummy_input)
-                            print(f"Original output shape: {original_output.shape}")
-                        
-                        # Compile with TensorRT - allow dynamic sequence length
-                        compile_spec = {
-                            "inputs": [dummy_input],
-                            "enabled_precisions": {torch.float32},  # FP32 only for stability
-                            "workspace_size": 1 << 30,  # 1GB workspace
-                            "debug": False,
-                            # Allow varied lengths
-                            "input_shapes": {
-                                "x": {
-                                    "min": [in_size[0], in_size[1], max(1, int(in_size[2] * 0.8))], 
-                                    "opt": [in_size[0], in_size[1], in_size[2]],
-                                    "max": [in_size[0], in_size[1], int(in_size[2] * 1.2)]
-                                }
-                            }
+                for var_len in variations:
+                    # Create a new shape with the varied sequence length
+                    new_shape = list(shape)
+                    new_shape[-1] = var_len
+                    shapes_to_optimize.append(tuple(new_shape))
+        
+        # Remove duplicates and sort
+        shapes_to_optimize = sorted(list(set(shapes_to_optimize)))
+        
+        # Try to optimize for each shape
+        for opt_shape in shapes_to_optimize[:3]:  # Limit to first 3 to avoid cache issues
+            try:
+                print(f"Creating TensorRT engine for shape {opt_shape}...")
+                
+                # Create a dummy input tensor
+                dummy_mel = torch.randn(opt_shape, device=device)
+                dummy_g = None
+                
+                # If the HiFiGAN decoder expects a speaker embedding, create one
+                try:
+                    # Try to infer the shape of the speaker embedding
+                    with torch.no_grad():
+                        # Create a fake speaker embedding if needed
+                        try:
+                            # Test if the HiFiGAN decoder needs a speaker embedding
+                            original_output = model.hifigan_decoder(dummy_mel)
+                        except TypeError:
+                            # If it fails without a speaker embedding, try with one
+                            dummy_g = torch.randn(1, 512, device=device)  # Typical speaker embedding size
+                except Exception as e:
+                    print(f"Error testing original decoder: {e}")
+                    continue
+                
+                # Compile with TensorRT
+                try:
+                    compile_spec = {
+                        "inputs": [dummy_mel] if dummy_g is None else [dummy_mel, dummy_g],
+                        "enabled_precisions": {torch.float},  # Use FP32 for stability
+                        "workspace_size": 1 << 30,  # 1GB workspace
+                        "debug": False,
+                        "truncate_long_and_double": True,  # Better compatibility
+                        "allow_shape_tensors": True,  # Allow shape tensors
+                        "min_block_size": 1,  # Optimize for smaller operations
+                        "device": {
+                            "device_type": "gpu",
+                            "gpu_id": 0
                         }
+                    }
+                    
+                    # Test run with the original module
+                    with torch.no_grad():
+                        if dummy_g is not None:
+                            original_output = model.hifigan_decoder(dummy_mel, g=dummy_g)
+                        else:
+                            original_output = model.hifigan_decoder(dummy_mel)
+                        
+                        print(f"Original output shape: {original_output.shape}")
+                    
+                    # Compile a specialized version for this input shape
+                    if dummy_g is not None:
+                        # Define a wrapper function to handle the g parameter
+                        def decoder_with_g(mel, g):
+                            return model.hifigan_decoder(mel, g=g)
                         
                         compiled_module = torch_tensorrt.compile(
-                            conv_post, 
+                            decoder_with_g,
                             **compile_spec
                         )
-                        
-                        # Test the compiled module
-                        with torch.no_grad():
-                            trt_output = compiled_module(dummy_input)
-                            print(f"TensorRT output shape: {trt_output.shape}")
-                            
-                            # Compare the outputs
-                            diff = torch.abs(original_output - trt_output).mean().item()
-                            print(f"Mean difference: {diff}")
-                        
-                        # Store the TensorRT engine
-                        wrapper.trt_engines[in_size] = compiled_module
-                        wrapper.is_tensorrt = True
-                    except Exception as e:
-                        print(f"Failed to create engine for size {in_size}: {e}")
-                
-                # Replace the original layer if optimization was successful
-                if wrapper.is_tensorrt:
-                    print("Successfully created TensorRT engines for conv_post layer")
-                    model.hifigan_decoder.waveform_decoder.conv_post = wrapper
-                    optimized_ups += 1
-                else:
-                    print("Failed to optimize conv_post layer")
+                    else:
+                        compiled_module = torch_tensorrt.compile(
+                            model.hifigan_decoder,
+                            **compile_spec
+                        )
                     
-            # Create a counter to track TensorRT activations
-            class TensorRTCounter:
-                def __init__(self):
-                    self.hits = 0
-                    self.misses = 0
-                    self.last_shapes = []
-                
-                def reset(self):
-                    self.hits = 0
-                    self.misses = 0
-                    self.last_shapes = []
-            
-            # Create counter instance
-            trt_counter = TensorRTCounter()
-            
-            # Set up a hook to count TensorRT usage and track shapes
-            def tensorrt_counter_hook(name):
-                def hook_fn(module, input, output):
-                    in_shape = tuple(input[0].shape)
-                    trt_counter.last_shapes.append((name, in_shape))
-                    
-                    if hasattr(module, 'is_tensorrt') and module.is_tensorrt:
-                        if in_shape in module.trt_engines:
-                            trt_counter.hits += 1
+                    # Verify the compiled module works
+                    with torch.no_grad():
+                        if dummy_g is not None:
+                            trt_output = compiled_module(dummy_mel, dummy_g)
                         else:
-                            trt_counter.misses += 1
-                            # Print the shape that wasn't found in engines
-                            print(f"TensorRT miss for {name} with shape {in_shape}")
-                
-                return hook_fn
+                            trt_output = compiled_module(dummy_mel)
+                        
+                        print(f"TensorRT output shape: {trt_output.shape}")
+                        
+                        # Check output quality
+                        diff = torch.abs(original_output - trt_output).mean().item()
+                        print(f"Mean difference: {diff}")
+                    
+                    # Store the engine in our wrapper
+                    shape_key = tuple(dummy_mel.shape)
+                    hifigan_wrapper.trt_engines[shape_key] = compiled_module
+                    hifigan_wrapper.is_tensorrt = True
+                    print(f"Successfully added TensorRT engine for shape {shape_key}")
+                    
+                except Exception as e:
+                    print(f"Failed to compile TensorRT engine for shape {opt_shape}: {e}")
             
-            # Register hooks on all optimized modules
-            hooks = []
-            if hasattr(model.hifigan_decoder, 'waveform_decoder'):
-                dec = model.hifigan_decoder.waveform_decoder
-                if hasattr(dec, 'ups'):
-                    for i, layer in enumerate(dec.ups):
-                        if hasattr(layer, 'is_tensorrt') and layer.is_tensorrt:
-                            hooks.append(layer.register_forward_hook(tensorrt_counter_hook(f"upsample_{i}")))
-                
-                if hasattr(dec, 'conv_post') and hasattr(dec.conv_post, 'is_tensorrt') and dec.conv_post.is_tensorrt:
-                    hooks.append(dec.conv_post.register_forward_hook(tensorrt_counter_hook("conv_post")))
-            
-            # Print stats function
-            def print_tensorrt_stats():
-                print(f"TensorRT usage stats: {trt_counter.hits} hits, {trt_counter.misses} misses")
-                if trt_counter.hits + trt_counter.misses > 0:
-                    hit_rate = trt_counter.hits / (trt_counter.hits + trt_counter.misses) * 100
-                    print(f"Hit rate: {hit_rate:.1f}%")
-                
-                # Reset counters
-                trt_counter.reset()
-
-        print("\nBased on TensorRT misses during test inference, we need to create engines for:")
-        for shape in trt_counter.last_shapes:
-            print(f"- {shape[0]} with shape {shape[1]}")
-        print("Consider updating the test_sizes to include these shapes for better hit rate.")
-
-    else:
-        print("Could not find HiFiGAN decoder structure")
+            except Exception as e:
+                print(f"Error optimizing for shape {opt_shape}: {e}")
+        
+        # Replace the original module if we successfully created any engines
+        if hifigan_wrapper.is_tensorrt and hifigan_wrapper.trt_engines:
+            print(f"Successfully created {len(hifigan_wrapper.trt_engines)} TensorRT engines for HiFiGAN decoder")
+            # Store the original for restoration later
+            original_hifigan_decoder = model.hifigan_decoder
+            # Replace with our wrapped version
+            model.hifigan_decoder = hifigan_wrapper
+            # Add to our tracking list
+            optimized_modules.append(hifigan_wrapper)
+        else:
+            print("Failed to create any TensorRT engines for HiFiGAN decoder")
+    
+    # Define a function to print TensorRT statistics
+    def print_tensorrt_stats():
+        for module in optimized_modules:
+            module.print_stats()
+    
 except Exception as e:
     print(f"Error during TensorRT optimization: {e}")
     print("Continuing with previously optimized model")
@@ -512,7 +467,7 @@ avg_optimized_time_approach1 = total_time / num_runs
 speedup_approach1 = standard_time / avg_optimized_time_approach1 if avg_optimized_time_approach1 > 0 else 0
 
 # Reset the timer for TensorRT approach
-print("\nApproach 2: Using PyTorch-TensorRT with dynamic shapes")
+print("\nApproach 2: Using PyTorch-TensorRT with optimized memory handling")
 total_time_trt = 0
 
 for i in range(num_runs):
@@ -520,14 +475,22 @@ for i in range(num_runs):
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         
+    # Pre-allocate GPU memory to reduce fragmentation
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        # Allocate and free a large tensor to consolidate memory
+        torch.empty(int(1e9)//4, dtype=torch.float, device=device)
+        torch.cuda.empty_cache()
+    
     start_time = time.time()
-    with torch.no_grad():  # Use no_grad but NOT autocast for the whole pipeline
-        tts.tts_to_file(
+    with torch.no_grad():  # Use no_grad for inference
+        output = tts.tts(
             text=chinese_text,
-            file_path=f"outputs/output_optimized_trt_{i+1}.wav",
             speaker_wav=speaker_wav,
             language=language
         )
+        # Write to file after timing to avoid including file I/O in measurement
+        tts.synthesizer.save_wav(output, f"outputs/output_optimized_trt_{i+1}.wav")
     run_time = time.time() - start_time
     total_time_trt += run_time
     print(f"Run {i+1}: {run_time:.4f} seconds")
@@ -687,8 +650,7 @@ print("2. Check for the 'Mean difference' values which indicate TensorRT outputs
 print("3. Monitor GPU utilization with 'nvidia-smi' in another terminal during inference")
 print("4. The speedup reported in the performance summary should show improvement\n")
 
-# Restore original methods
-if hasattr(model, 'hifigan_decoder') and 'original_forward' in locals():
-    import types
-    model.hifigan_decoder.forward = types.MethodType(original_forward, model.hifigan_decoder)
-    print("Restored original HiFiGAN decoder forward method")
+# Restore original modules
+if 'original_hifigan_decoder' in locals():
+    model.hifigan_decoder = original_hifigan_decoder
+    print("Restored original HiFiGAN decoder")
