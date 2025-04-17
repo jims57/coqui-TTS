@@ -5,6 +5,9 @@ import torchaudio
 from TTS.tts.configs.xtts_config import XttsConfig
 from TTS.tts.models.xtts import Xtts
 
+# Create outputs directory if it doesn't exist
+os.makedirs("outputs", exist_ok=True)
+
 print("Loading model...")
 config = XttsConfig()
 config.load_json("/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/config.json")
@@ -21,7 +24,14 @@ chunks = model.inference_stream(
     "昨天我在书店发现了一本很有趣的小说，立刻就买下来了。",
     "zh-cn",
     gpt_cond_latent,
-    speaker_embedding
+    speaker_embedding,
+    stream_chunk_size=5,
+    overlap_wav_len=1024,
+    temperature=0.75,
+    length_penalty=1.0,
+    repetition_penalty=10.0,
+    top_k=50,
+    speed=1,
 )
 
 wav_chuncks = []
@@ -34,11 +44,11 @@ for i, chunk in enumerate(chunks):
     wav_chuncks.append(chunk)
     
     # Save each chunk as opus file with timestamp-based naming
-    chunk_filename = f"{timestamp}-{i+1}.opus"
+    chunk_filename = f"outputs/{timestamp}-{i+1}.opus"
     # Convert to CPU and ensure right format before saving
     chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
     torchaudio.save(chunk_filename, chunk_audio, 24000, format="opus")
 
 # Still concatenate for reference but save as opus instead of wav
 wav = torch.cat(wav_chuncks, dim=0)
-torchaudio.save(f"{timestamp}-full.opus", wav.squeeze().unsqueeze(0).cpu(), 24000, format="opus")
+torchaudio.save(f"outputs/{timestamp}-full.opus", wav.squeeze().unsqueeze(0).cpu(), 24000, format="opus")
