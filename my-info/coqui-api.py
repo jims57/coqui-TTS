@@ -1452,7 +1452,8 @@ async def combine_audio_segments_background(segment_files, full_audio_path, audi
                     # Combine with overlap
                     if len(overlapped_segments) > 0:
                         combined = []
-                        overlap_samples = 550  # ~25ms overlap at 22050Hz
+                        # Increase overlap for smoother transitions - now ~50ms (from 25ms)
+                        overlap_samples = 1100  # ~50ms overlap at 22050Hz
                         
                         for i, segment in enumerate(overlapped_segments):
                             if i == 0:
@@ -1464,9 +1465,11 @@ async def combine_audio_segments_background(segment_files, full_audio_path, audi
                                     # Calculate overlap
                                     overlap_start = len(combined) - overlap_samples
                                     
-                                    # Crossfade weights (linear fade)
-                                    fade_in = np.linspace(0, 1, overlap_samples)
-                                    fade_out = np.linspace(1, 0, overlap_samples)
+                                    # Smoother crossfade weights using a cosine curve
+                                    # This creates a more natural transition than linear fading
+                                    fade_positions = np.linspace(0, np.pi, overlap_samples)
+                                    fade_in = (1 - np.cos(fade_positions)) / 2  # Cosine fade in (smoother)
+                                    fade_out = (1 + np.cos(fade_positions)) / 2  # Cosine fade out (smoother)
                                     
                                     # Apply crossfade to overlapping region
                                     overlap_region = combined[overlap_start:] * fade_out + segment[:overlap_samples] * fade_in
@@ -1480,19 +1483,20 @@ async def combine_audio_segments_background(segment_files, full_audio_path, audi
                         # Save the combined WAV
                         wavfile.write(overlapped_wav, 22050, combined.astype(np.int16))
                         
-                        # Convert to final opus
+                        # Convert to final opus with higher quality settings
                         subprocess.run([
                             "ffmpeg",
                             "-i", overlapped_wav,
                             "-c:a", "libopus",
-                            "-b:a", "32k",
-                            "-application", "voip",
+                            "-b:a", "48k",  # Slightly higher bitrate for better quality
+                            "-application", "audio",  # Use 'audio' mode for better speech quality
                             "-vbr", "on",
+                            "-compression_level", "10",  # Maximum compression quality
                             full_audio_path,
                             "-y"
                         ], check=False, capture_output=True)
                         
-                        print(f"Saved combined Opus to {full_audio_path} with crossfaded overlaps")
+                        print(f"Saved combined Opus to {full_audio_path} with enhanced crossfaded overlaps")
                     else:
                         # Fallback to simple concat
                         print("No valid overlapped segments, falling back to simple concatenation")
