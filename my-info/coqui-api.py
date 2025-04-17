@@ -352,6 +352,7 @@ async def websocket_endpoint(websocket: WebSocket):
         language = "en"  # Default language
         audio_format = "opus"  # Default audio format
         words_per_segment = DEFAULT_WORDS_PER_SEGMENT  # Default words per segment
+        save_log = False  # Default to not saving logs
         
         for key, value in headers.items():
             key_lower = key.lower()
@@ -369,11 +370,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 except ValueError:
                     # If not a valid integer, use default
                     words_per_segment = DEFAULT_WORDS_PER_SEGMENT
+            elif key_lower == "savelog":
+                # Only set to True if value is exactly "true" (case-insensitive)
+                save_log = value.lower() == "true"
                 
         print(f"API key extracted from headers: {api_key}")
         print(f"Language parameter from headers: {language}")
         print(f"Audio format parameter from headers: {audio_format}")
         print(f"Words per segment parameter: {words_per_segment}")
+        print(f"Save log parameter: {save_log}")
         
         # Validate audio format
         if audio_format not in ["wav", "opus"]:
@@ -427,6 +432,14 @@ async def websocket_endpoint(websocket: WebSocket):
                     except ValueError:
                         # If not a valid integer, keep current value
                         pass
+                # If saveLog is provided in message, it overrides the header
+                message_save_log = message.get("saveLog")
+                if message_save_log is not None:
+                    # Only set to True if value is exactly true (boolean) or "true" (string)
+                    if isinstance(message_save_log, bool):
+                        save_log = message_save_log
+                    elif isinstance(message_save_log, str):
+                        save_log = message_save_log.lower() == "true"
                 
                 # Validate audio format again in case it was changed in the message
                 if audio_format not in ["wav", "opus"]:
@@ -668,8 +681,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 opus_path = f"outputs/output_{timestamp}.opus"
                 
                 # Start a task to save the file in the background if needed
-                # Instead of regenerating the entire audio, we'll simply save a filename for logging
-                if len(segments) > 1:
+                # Only save info log if saveLog is true
+                if len(segments) > 1 and save_log:
                     # Create a text file with information about the segmented generation
                     info_path = f"outputs/info_{timestamp}.txt"
                     asyncio.create_task(
