@@ -89,6 +89,10 @@ app = FastAPI()
 # Global variable for TTS model
 global_tts = None
 
+# Add this near the top of the file with other global variables
+# Default number of words per TTS segment for streaming
+DEFAULT_WORDS_PER_SEGMENT = 3
+
 def initialize_tts():
     global global_tts, global_chinese_tts
     try:
@@ -347,6 +351,7 @@ async def websocket_endpoint(websocket: WebSocket):
         api_key = None
         language = "en"  # Default language
         audio_format = "opus"  # Default audio format
+        words_per_segment = DEFAULT_WORDS_PER_SEGMENT  # Default words per segment
         
         for key, value in headers.items():
             key_lower = key.lower()
@@ -356,10 +361,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 language = value.lower()
             elif key_lower == "audioformat":
                 audio_format = value.lower()
+            elif key_lower == "wordspersegment":
+                try:
+                    words_per_segment = int(value)
+                    # Ensure at least 1 word per segment
+                    words_per_segment = max(1, words_per_segment)
+                except ValueError:
+                    # If not a valid integer, use default
+                    words_per_segment = DEFAULT_WORDS_PER_SEGMENT
                 
         print(f"API key extracted from headers: {api_key}")
         print(f"Language parameter from headers: {language}")
         print(f"Audio format parameter from headers: {audio_format}")
+        print(f"Words per segment parameter: {words_per_segment}")
         
         # Validate audio format
         if audio_format not in ["wav", "opus"]:
@@ -403,6 +417,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 message_audio_format = message.get("audioFormat")
                 if message_audio_format:
                     audio_format = message_audio_format.lower()
+                # If wordsPerSegment is provided in message, it overrides the header
+                message_words_per_segment = message.get("wordsPerSegment")
+                if message_words_per_segment is not None:
+                    try:
+                        words_per_segment = int(message_words_per_segment)
+                        # Ensure at least 1 word per segment
+                        words_per_segment = max(1, words_per_segment)
+                    except ValueError:
+                        # If not a valid integer, keep current value
+                        pass
                 
                 # Validate audio format again in case it was changed in the message
                 if audio_format not in ["wav", "opus"]:
@@ -416,7 +440,7 @@ async def websocket_endpoint(websocket: WebSocket):
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
             
-            print(f"Processing text: {text} with language: {language}, format: {audio_format}")
+            print(f"Processing text: {text} with language: {language}, format: {audio_format}, words per segment: {words_per_segment}")
             
             try:
                 # Validate language again in case it was changed in the message
@@ -439,136 +463,239 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                     continue
                 
-                # Generate the audio data
-                try:
-                    if language == "en":
-                        # Use FastPitch for English text
-                        with torch.inference_mode():
-                            wav_result = global_tts.tts(text=text)
-                    else:
-                        # Use XTTS v2 for other supported languages
-                        with torch.inference_mode():
-                            wav_result = global_chinese_tts.tts(
-                                text=text,
+                # Split text into segments of words_per_segment words
+                segments = []
+                
+                # Handle Chinese characters differently if detected
+                if detected_lang == "zh-cn":
+                    # For Chinese, each character can be considered a "word"
+                    char_count = 0
+                    current_segment = ""
+                    
+                    for char in text:
+                        current_segment += char
+                        # Check if the character is a Chinese character
+                        if '\u4e00' <= char <= '\u9fff':
+                            char_count += 1
+                            if char_count >= words_per_segment:
+                                segments.append(current_segment)
+                                current_segment = ""
+                                char_count = 0
+                    
+                    # Add any remaining text as the final segment
+                    if current_segment:
+                        segments.append(current_segment)
+                else:
+                    # For other languages, split by whitespace
+                    words = text.split()
+                    
+                    for i in range(0, len(words), words_per_segment):
+                        segment = " ".join(words[i:i + words_per_segment])
+                        segments.append(segment)
+                
+                # If no segments were created or text is very short, use the whole text
+                if not segments:
+                    segments = [text]
+                
+                print(f"Split text into {len(segments)} segments with {words_per_segment} words per segment")
+                
+                # Process each segment sequentially
+                all_audio_chunks = []
+                
+                for i, segment in enumerate(segments):
+                    print(f"Processing segment {i+1}/{len(segments)}: {segment[:30]}...")
+                    
+                    # Generate the audio data for this segment
+                    try:
+                        if language == "en":
+                            # Use FastPitch for English text
+                            with torch.inference_mode():
+                                wav_result = global_tts.tts(text=segment)
+                        else:
+                            # Use XTTS v2 for other supported languages
+                            with torch.inference_mode():
+                                wav_result = global_chinese_tts.tts(
+                                    text=segment,
+                                    speaker_wav=sample_wav_path,
+                                    language=language
+                                )
+                        
+                        # Ensure wav is a properly formatted numpy array
+                        wav = ensure_numpy_array(wav_result)
+                        
+                    except Exception as tts_err:
+                        print(f"Error in TTS generation for segment {i+1}: {tts_err}")
+                        # Use tts_to_file as a fallback if direct TTS fails
+                        timestamp = int(time.time())
+                        fallback_wav_path = f"outputs/fallback_{timestamp}_{i}.wav"
+                        
+                        if language == "en":
+                            global_tts.tts_to_file(text=segment, file_path=fallback_wav_path)
+                        else:
+                            global_chinese_tts.tts_to_file(
+                                text=segment,
+                                file_path=fallback_wav_path,
                                 speaker_wav=sample_wav_path,
                                 language=language
                             )
+                        
+                        # Load the wav file
+                        sample_rate, wav = wavfile.read(fallback_wav_path)
+                        # Convert to float in range [-1, 1]
+                        wav = wav.astype(np.float32) / 32767.0
                     
-                    # Print debug info about the result
-                    print(f"TTS result type: {type(wav_result)}")
-                    if hasattr(wav_result, 'shape'):
-                        print(f"TTS result shape: {wav_result.shape}")
+                    # Normalize and convert to 16-bit PCM
+                    wav = np.clip(wav, -1, 1)
+                    wav = (wav * 32767).astype(np.int16)
                     
-                    # Ensure wav is a properly formatted numpy array
-                    wav = ensure_numpy_array(wav_result)
-                    print(f"After ensure_numpy_array - type: {type(wav)}, shape: {wav.shape if hasattr(wav, 'shape') else 'no shape'}")
+                    # Make sure wav is a 1D array
+                    if not isinstance(wav, np.ndarray) or wav.ndim == 0:
+                        print("Converting scalar to 1D array")
+                        wav = np.array([wav.item() if hasattr(wav, 'item') else float(wav)], dtype=np.int16)
                     
-                except Exception as tts_err:
-                    print(f"Error in TTS generation: {tts_err}")
-                    # Use tts_to_file as a fallback if direct TTS fails
-                    timestamp = int(time.time())
-                    fallback_wav_path = f"outputs/fallback_{timestamp}.wav"
-                    
-                    if language == "en":
-                        global_tts.tts_to_file(text=text, file_path=fallback_wav_path)
+                    # For first segment, process and start streaming immediately
+                    if i == 0:
+                        # Define chunk size (in samples)
+                        chunk_size = 1024
+                        total_samples = len(wav)
+                        
+                        print(f"Total audio samples in segment {i+1}: {total_samples}")
+                        
+                        # If WAV format, stream raw PCM chunks
+                        if audio_format == "wav":
+                            print(f"Streaming first segment in WAV format")
+                            # Stream chunks
+                            for j in range(0, total_samples, chunk_size):
+                                chunk = wav[j:min(j + chunk_size, total_samples)]
+                                
+                                # Convert to bytes (raw PCM data)
+                                chunk_bytes = chunk.tobytes()
+                                await websocket.send_bytes(chunk_bytes)
+                        
+                        # If Opus format, use FFmpeg to encode and send chunks
+                        elif audio_format == "opus":
+                            print(f"Streaming first segment in Opus format")
+                            # Create a subprocess for FFmpeg
+                            process = subprocess.Popen(
+                                [
+                                    "ffmpeg",
+                                    "-f", "s16le",      # 16-bit PCM input
+                                    "-ar", "22050",     # Sample rate
+                                    "-ac", "1",         # Mono
+                                    "-i", "pipe:0",     # Read from stdin
+                                    "-c:a", "libopus",
+                                    "-b:a", "32k",
+                                    "-application", "voip",
+                                    "-vbr", "on",
+                                    "-f", "opus",
+                                    "pipe:1"            # Output to stdout
+                                ],
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            
+                            # Send the entire PCM data to ffmpeg
+                            opus_data, stderr = process.communicate(input=wav.tobytes())
+                            
+                            if process.returncode != 0:
+                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                                await websocket.send_json({
+                                    "errorCode": error["errorCode"], 
+                                    "message": f"{error['message']}: FFmpeg encoding failed"
+                                })
+                                continue
+                            
+                            # Stream the opus data in chunks
+                            opus_chunk_size = 1024  # Bytes per chunk
+                            for j in range(0, len(opus_data), opus_chunk_size):
+                                opus_chunk = opus_data[j:min(j + opus_chunk_size, len(opus_data))]
+                                await websocket.send_bytes(opus_chunk)
                     else:
-                        global_chinese_tts.tts_to_file(
-                            text=text,
-                            file_path=fallback_wav_path,
-                            speaker_wav=sample_wav_path,
-                            language=language
-                        )
-                    
-                    # Load the wav file
-                    sample_rate, wav = wavfile.read(fallback_wav_path)
-                    # Convert to float in range [-1, 1]
-                    wav = wav.astype(np.float32) / 32767.0
+                        # For subsequent segments, stream immediately after generating
+                        chunk_size = 1024
+                        total_samples = len(wav)
+                        
+                        # If WAV format, stream raw PCM chunks
+                        if audio_format == "wav":
+                            # Stream chunks
+                            for j in range(0, total_samples, chunk_size):
+                                chunk = wav[j:min(j + chunk_size, total_samples)]
+                                
+                                # Convert to bytes (raw PCM data)
+                                chunk_bytes = chunk.tobytes()
+                                await websocket.send_bytes(chunk_bytes)
+                        
+                        # If Opus format, use FFmpeg to encode and send chunks
+                        elif audio_format == "opus":
+                            # Create a subprocess for FFmpeg
+                            process = subprocess.Popen(
+                                [
+                                    "ffmpeg",
+                                    "-f", "s16le",      # 16-bit PCM input
+                                    "-ar", "22050",     # Sample rate
+                                    "-ac", "1",         # Mono
+                                    "-i", "pipe:0",     # Read from stdin
+                                    "-c:a", "libopus",
+                                    "-b:a", "32k",
+                                    "-application", "voip",
+                                    "-vbr", "on",
+                                    "-f", "opus",
+                                    "pipe:1"            # Output to stdout
+                                ],
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            
+                            # Send the entire PCM data to ffmpeg
+                            opus_data, stderr = process.communicate(input=wav.tobytes())
+                            
+                            if process.returncode != 0:
+                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                continue
+                            
+                            # Stream the opus data in chunks
+                            opus_chunk_size = 1024  # Bytes per chunk
+                            for j in range(0, len(opus_data), opus_chunk_size):
+                                opus_chunk = opus_data[j:min(j + opus_chunk_size, len(opus_data))]
+                                await websocket.send_bytes(opus_chunk)
                 
-                # Save the audio in the background
+                # Save the combined audio in the background
                 timestamp = int(time.time())
                 wav_path = f"outputs/output_{timestamp}.wav"
                 opus_path = f"outputs/output_{timestamp}.opus"
                 
-                # Start a task to save the file in the background
-                asyncio.create_task(
-                    save_audio_file_background(wav, wav_path, opus_path, audio_format)
-                )
-                
-                # Normalize and convert to 16-bit PCM
-                wav = np.clip(wav, -1, 1)
-                wav = (wav * 32767).astype(np.int16)
-                
-                # Debug the final wav array
-                print(f"Final wav type: {type(wav)}, shape: {wav.shape if hasattr(wav, 'shape') else 'no shape'}")
-                
-                # Make sure wav is a 1D array
-                if not isinstance(wav, np.ndarray) or wav.ndim == 0:
-                    print("Converting scalar to 1D array")
-                    wav = np.array([wav.item() if hasattr(wav, 'item') else float(wav)], dtype=np.int16)
-                
-                # Define chunk size (in samples)
-                chunk_size = 1024
-                total_samples = len(wav)
-                
-                print(f"Total audio samples: {total_samples}")
-                
-                # If WAV format, stream raw PCM chunks
-                if audio_format == "wav":
-                    # Track first chunk timing
-                    first_chunk = True
-                    
-                    # Stream chunks
-                    for i in range(0, total_samples, chunk_size):
-                        chunk = wav[i:min(i + chunk_size, total_samples)]
+                # Start a task to save the file in the background if needed
+                # This can be useful for logging/debugging
+                if len(segments) > 1:
+                    # Generate the complete audio for saving in the background
+                    try:
+                        if language == "en":
+                            # Use FastPitch for English text
+                            with torch.inference_mode():
+                                wav_array = global_tts.tts(text=text)
+                        else:
+                            # Use XTTS v2 for other supported languages
+                            with torch.inference_mode():
+                                wav_array = global_chinese_tts.tts(
+                                    text=text,
+                                    speaker_wav=sample_wav_path,
+                                    language=language
+                                )
                         
-                        # Convert to bytes (raw PCM data)
-                        chunk_bytes = chunk.tobytes()
+                        # Ensure wav is a properly formatted numpy array
+                        wav_array = ensure_numpy_array(wav_array)
                         
-                        if first_chunk:
-                            first_chunk = False
-                            print("Sending first WAV chunk")
-                            
-                        await websocket.send_bytes(chunk_bytes)
-                
-                # If Opus format, use FFmpeg to encode and send chunks
-                elif audio_format == "opus":
-                    # Create a subprocess for FFmpeg
-                    process = subprocess.Popen(
-                        [
-                            "ffmpeg",
-                            "-f", "s16le",      # 16-bit PCM input
-                            "-ar", "22050",     # Sample rate
-                            "-ac", "1",         # Mono
-                            "-i", "pipe:0",     # Read from stdin
-                            "-c:a", "libopus",
-                            "-b:a", "32k",
-                            "-application", "voip",
-                            "-vbr", "on",
-                            "-f", "opus",
-                            "pipe:1"            # Output to stdout
-                        ],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    
-                    # Send the entire PCM data to ffmpeg
-                    opus_data, stderr = process.communicate(input=wav.tobytes())
-                    
-                    if process.returncode != 0:
-                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                        error = ERROR_CODES["TTS_GENERATION_ERROR"]
-                        await websocket.send_json({
-                            "errorCode": error["errorCode"], 
-                            "message": f"{error['message']}: FFmpeg encoding failed"
-                        })
-                        continue
-                    
-                    # Stream the opus data in chunks
-                    opus_chunk_size = 1024  # Bytes per chunk
-                    for i in range(0, len(opus_data), opus_chunk_size):
-                        opus_chunk = opus_data[i:min(i + opus_chunk_size, len(opus_data))]
-                        await websocket.send_bytes(opus_chunk)
+                        # Start the background task with the full audio array
+                        asyncio.create_task(
+                            save_audio_file_background(wav_array, wav_path, opus_path, audio_format)
+                        )
+                    except Exception as e:
+                        print(f"Error generating full audio for background save: {e}")
+                        # If we can't generate the full audio, don't try to save it
+                        pass
                 
                 # Send an empty chunk to signal completion
                 await websocket.send_bytes(b'')
