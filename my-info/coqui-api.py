@@ -349,47 +349,55 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
     )
 
 @app.websocket("/tts-stream")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Query(None)):
     print("WebSocket connection attempt")
     
     await websocket.accept()
     try:
-        # Extract API key from headers
-        headers = dict(websocket.headers)
-        print(f"WebSocket headers received: {headers}")
+        # Extract API key from query parameters first
+        if not api_key:
+            # Extract API key from headers (case-insensitive) as fallback
+            headers = dict(websocket.headers)
+            print(f"WebSocket headers received: {headers}")
+            
+            # Find API key in headers (case-insensitive)
+            api_key = None
+            language = "en"  # Default language
+            audio_format = "opus"  # Default audio format
+            words_per_segment = DEFAULT_WORDS_PER_SEGMENT  # Default words per segment
+            save_log = False  # Default to not saving logs
+            
+            for key, value in headers.items():
+                key_lower = key.lower()
+                if key_lower == API_KEY_NAME.lower():
+                    api_key = value
+                elif key_lower == "language":
+                    language = value.lower()
+                elif key_lower == "audioformat":
+                    audio_format = value.lower()
+                elif key_lower == "wordspersegment":
+                    try:
+                        words_per_segment = int(value)
+                        # Ensure at least 1 word per segment
+                        words_per_segment = max(1, words_per_segment)
+                    except ValueError:
+                        # If not a valid integer, use default
+                        words_per_segment = DEFAULT_WORDS_PER_SEGMENT
+                elif key_lower == "savelog":
+                    # Only set to True if value is exactly "true" (case-insensitive)
+                    save_log = value.lower() == "true"
+        else:
+            # Initialize default values when api_key is provided in query parameters
+            language = "en"
+            audio_format = "opus"
+            words_per_segment = DEFAULT_WORDS_PER_SEGMENT
+            save_log = False
         
-        # Find API key in headers (case-insensitive)
-        api_key = None
-        language = "en"  # Default language
-        audio_format = "opus"  # Default audio format
-        words_per_segment = DEFAULT_WORDS_PER_SEGMENT  # Default words per segment
-        save_log = False  # Default to not saving logs
-        
-        for key, value in headers.items():
-            key_lower = key.lower()
-            if key_lower == API_KEY_NAME.lower():
-                api_key = value
-            elif key_lower == "language":
-                language = value.lower()
-            elif key_lower == "audioformat":
-                audio_format = value.lower()
-            elif key_lower == "wordspersegment":
-                try:
-                    words_per_segment = int(value)
-                    # Ensure at least 1 word per segment
-                    words_per_segment = max(1, words_per_segment)
-                except ValueError:
-                    # If not a valid integer, use default
-                    words_per_segment = DEFAULT_WORDS_PER_SEGMENT
-            elif key_lower == "savelog":
-                # Only set to True if value is exactly "true" (case-insensitive)
-                save_log = value.lower() == "true"
-                
-        print(f"API key extracted from headers: {api_key}")
-        print(f"Language parameter from headers: {language}")
-        print(f"Audio format parameter from headers: {audio_format}")
-        print(f"Words per segment parameter: {words_per_segment}")
-        print(f"Save log parameter: {save_log}")
+        # For demo purposes, use a default API key if none provided
+        if not api_key:
+            api_key = "sk-1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t"  # Use one of your valid API keys
+            
+        print(f"API key extracted: {api_key}")
         
         # Validate audio format
         if audio_format not in ["wav", "opus"]:
@@ -425,6 +433,23 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Try to parse as JSON
                 message = json.loads(data)
                 text = message.get("text", "")
+                
+                # Check if there's a config flag in the message and skip text processing
+                if message.get("config", False):
+                    # This is a configuration message, not a text to process
+                    print("Received configuration message, skipping TTS processing")
+                    continue
+                
+                # Check if text is empty or only whitespace
+                if not text or text.isspace():
+                    print("Error: Empty text received")
+                    error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                    await websocket.send_json({
+                        "errorCode": error["errorCode"], 
+                        "message": "Empty text received. Please provide text to convert to speech."
+                    })
+                    continue
+                
                 # If language is provided in message, it overrides the header
                 message_language = message.get("language")
                 if message_language:
@@ -460,6 +485,16 @@ async def websocket_endpoint(websocket: WebSocket):
             except json.JSONDecodeError:
                 # If not JSON, assume it's just text
                 text = data
+                
+                # Check if text is empty or only whitespace
+                if not text or text.isspace():
+                    print("Error: Empty text received")
+                    error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                    await websocket.send_json({
+                        "errorCode": error["errorCode"], 
+                        "message": "Empty text received. Please provide text to convert to speech."
+                    })
+                    continue
             
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')

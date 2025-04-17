@@ -50,12 +50,21 @@
             border-radius: 4px;
             border: 1px solid #ccc;
         }
+        .api-key-input {
+            margin-bottom: 10px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Text-to-Speech WebClient</h1>
         <div id="status">WebSocket Status: Disconnected</div>
+        
+        <div class="api-key-input">
+            <label for="apiKey">API Key:</label>
+            <input type="text" id="apiKey" value="sk-5z6y7x8w9v0u1t2s3r4q5p6o7n8m9l0k1j2i3h4g" style="width: 300px;">
+        </div>
+        
         <textarea id="textInput" placeholder="Enter text to convert to speech..."></textarea>
         
         <div class="controls">
@@ -93,12 +102,32 @@
         let audioFormat = "opus"; // Default audio format
 
         function connect() {
-            // Update the WebSocket URL to the new endpoint
-            ws = new WebSocket('ws://106.150.252.89:51104/tts-stream');
+            // Get the API key from the input field
+            const apiKey = document.getElementById('apiKey').value.trim();
+            if (!apiKey) {
+                document.getElementById('status').textContent = 'WebSocket Status: API Key Required';
+                return;
+            }
+            
+            // Create a WebSocket connection with API key as a query parameter
+            const wsUrl = `ws://${window.location.host}/tts-stream?api_key=${apiKey}`;
+            ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
                 document.getElementById('status').textContent = 'WebSocket Status: Connected';
                 audioChunks = []; // Reset chunks on new connection
+                
+                // Send headers to the server
+                const language = document.getElementById('languageSelect').value;
+                const audioFormat = document.getElementById('formatSelect').value;
+                
+                // Send initial configuration message
+                ws.send(JSON.stringify({
+                    "config": true,
+                    "language": language,
+                    "audioFormat": audioFormat,
+                    "X-API-Key": apiKey
+                }));
             };
 
             ws.onclose = () => {
@@ -120,8 +149,8 @@
                     } else {
                         try {
                             const jsonData = JSON.parse(event.data);
-                            if (jsonData.error) {
-                                alert('Error generating audio: ' + jsonData.error);
+                            if (jsonData.error || jsonData.errorCode) {
+                                alert('Error: ' + (jsonData.message || jsonData.error));
                             }
                         } catch (e) {
                             console.error('Unexpected data format:', event.data);
@@ -278,18 +307,28 @@
                     // Get selected language and audio format
                     const language = document.getElementById('languageSelect').value;
                     audioFormat = document.getElementById('formatSelect').value;
+                    const apiKey = document.getElementById('apiKey').value;
                     
                     // Send as JSON with parameters
                     const request = {
                         text: text,
                         language: language,
-                        audioFormat: audioFormat
+                        audioFormat: audioFormat,
+                        "X-API-Key": apiKey
                     };
                     
                     ws.send(JSON.stringify(request));
                 }
             } else {
-                alert('WebSocket is not connected. Please wait for reconnection.');
+                // Try to reconnect if WebSocket is not connected
+                connect();
+                setTimeout(() => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        sendText();
+                    } else {
+                        alert('WebSocket is not connected. Please wait for reconnection.');
+                    }
+                }, 1000);
             }
         }
 
