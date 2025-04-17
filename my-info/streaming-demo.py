@@ -25,7 +25,7 @@ chunks = model.inference_stream(
     "zh-cn",
     gpt_cond_latent,
     speaker_embedding,
-    stream_chunk_size=5,
+    stream_chunk_size=20,
     overlap_wav_len=1024,
     temperature=0.75,
     length_penalty=1.0,
@@ -38,9 +38,10 @@ wav_chuncks = []
 timestamp = int(time.time() * 1000)  # Current timestamp in milliseconds
 
 for i, chunk in enumerate(chunks):
+    chunk_time = (time.time() - t0) * 1000  # Time in milliseconds since inference began
     if i == 0:
-        print(f"Time to first chunck: {time.time() - t0}")
-    print(f"Received chunk {i} of audio length {chunk.shape[-1]}")
+        print(f"Time to first chunck: {chunk_time:.2f} ms")
+    print(f"Received chunk {i} of audio length {chunk.shape[-1]} at {chunk_time:.2f} ms")
     wav_chuncks.append(chunk)
     
     # Save each chunk as opus file with timestamp-based naming
