@@ -32,6 +32,7 @@ from clean_wav_files_in_outputs import async_clean_wav_files
 import subprocess
 import glob
 import fnmatch
+from fastapi.staticfiles import StaticFiles
 
 
 os.environ["TTS_HOME"] = "/app/coqui-tts"
@@ -87,6 +88,14 @@ def generate_audio(text="Great achievements often start with a small act of cour
     return "outputs/output.wav"
 
 app = FastAPI()
+
+# Mount the current directory to serve static files
+app.mount("/static", StaticFiles(directory="."), name="static")
+
+# Add a specific endpoint to serve webclient.html directly from root path
+@app.get("/webclient.html")
+async def get_webclient():
+    return FileResponse("webclient.html")
 
 # Global variable for TTS model
 global_tts = None

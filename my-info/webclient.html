@@ -35,6 +35,21 @@
         #status {
             color: #666;
         }
+        .controls {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 15px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        select {
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+        }
     </style>
 </head>
 <body>
@@ -42,6 +57,31 @@
         <h1>Text-to-Speech WebClient</h1>
         <div id="status">WebSocket Status: Disconnected</div>
         <textarea id="textInput" placeholder="Enter text to convert to speech..."></textarea>
+        
+        <div class="controls">
+            <div class="control-group">
+                <label for="languageSelect">Language:</label>
+                <select id="languageSelect">
+                    <option value="en">English</option>
+                    <option value="zh-cn">Chinese</option>
+                    <option value="fr">French</option>
+                    <option value="de">German</option>
+                    <option value="es">Spanish</option>
+                    <option value="ja">Japanese</option>
+                    <option value="ko">Korean</option>
+                    <option value="ru">Russian</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label for="formatSelect">Audio Format:</label>
+                <select id="formatSelect">
+                    <option value="opus">Opus</option>
+                    <option value="wav">WAV</option>
+                </select>
+            </div>
+        </div>
+        
         <button onclick="sendText()">Convert to Speech</button>
         <audio id="audioPlayer" controls></audio>
     </div>
@@ -50,10 +90,11 @@
         let ws;
         let audioContext;
         let audioChunks = [];
+        let audioFormat = "opus"; // Default audio format
 
         function connect() {
-            ws = new WebSocket('ws://fc3-tts.watchfun.cn/tts-stream');
-            // ws = new WebSocket('ws://localhost:9000/tts-stream');
+            // Update the WebSocket URL to the new endpoint
+            ws = new WebSocket('ws://106.150.252.89:51104/tts-stream');
             
             ws.onopen = () => {
                 document.getElementById('status').textContent = 'WebSocket Status: Connected';
@@ -103,19 +144,26 @@
                 // Get the raw audio data
                 const rawAudioData = concatenateAudioBuffers(audioChunks);
                 
-                // Create WAV header with correct format
-                const wavHeader = createWavHeader(rawAudioData.byteLength);
+                // Get current audio format
+                audioFormat = document.getElementById('formatSelect').value;
                 
-                // Combine header and audio data
-                const completeAudioBuffer = new ArrayBuffer(wavHeader.byteLength + rawAudioData.byteLength);
-                const completeView = new Uint8Array(completeAudioBuffer);
-                completeView.set(new Uint8Array(wavHeader), 0);
-                completeView.set(new Uint8Array(rawAudioData), wavHeader.byteLength);
-
-                // Create blob with correct MIME type
-                const blob = new Blob([completeAudioBuffer], {
-                    type: 'audio/wav'
-                });
+                // Create blob with correct MIME type based on format
+                let blob;
+                if (audioFormat === 'wav') {
+                    // Create WAV header with correct format
+                    const wavHeader = createWavHeader(rawAudioData.byteLength);
+                    
+                    // Combine header and audio data
+                    const completeAudioBuffer = new ArrayBuffer(wavHeader.byteLength + rawAudioData.byteLength);
+                    const completeView = new Uint8Array(completeAudioBuffer);
+                    completeView.set(new Uint8Array(wavHeader), 0);
+                    completeView.set(new Uint8Array(rawAudioData), wavHeader.byteLength);
+                    
+                    blob = new Blob([completeAudioBuffer], { type: 'audio/wav' });
+                } else {
+                    // For opus format, just use the raw data
+                    blob = new Blob([rawAudioData], { type: 'audio/opus' });
+                }
 
                 // Clean up previous blob URL
                 const audioPlayer = document.getElementById('audioPlayer');
@@ -145,11 +193,16 @@
                     });
                 }
 
-                const audioBuffer = await audioContext.decodeAudioData(completeAudioBuffer);
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-                source.start(0);
+                try {
+                    const audioBuffer = await audioContext.decodeAudioData(rawAudioData);
+                    const source = audioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(audioContext.destination);
+                    source.start(0);
+                } catch (decodeError) {
+                    console.log('Web Audio API playback failed, falling back to standard audio element:', decodeError);
+                    audioPlayer.play();
+                }
 
             } catch (error) {
                 console.error('Error playing audio:', error);
@@ -221,7 +274,19 @@
                 const text = document.getElementById('textInput').value;
                 if (text.trim()) {
                     audioChunks = []; // Reset chunks before new request
-                    ws.send(text);
+                    
+                    // Get selected language and audio format
+                    const language = document.getElementById('languageSelect').value;
+                    audioFormat = document.getElementById('formatSelect').value;
+                    
+                    // Send as JSON with parameters
+                    const request = {
+                        text: text,
+                        language: language,
+                        audioFormat: audioFormat
+                    };
+                    
+                    ws.send(JSON.stringify(request));
                 }
             } else {
                 alert('WebSocket is not connected. Please wait for reconnection.');
@@ -243,4 +308,4 @@
         });
     </script>
 </body>
-</html>
+</html> 
