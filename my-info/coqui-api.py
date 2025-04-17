@@ -30,6 +30,8 @@ import struct
 import asyncio
 from clean_wav_files_in_outputs import async_clean_wav_files
 import subprocess
+import glob
+import fnmatch
 
 
 os.environ["TTS_HOME"] = "/app/coqui-tts"
@@ -512,9 +514,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 print(f"Split text into {len(segments)} segments with {words_per_segment} words per segment")
                 
-                # Process each segment sequentially
-                all_audio_chunks = []
+                # Generate timestamp for this session
+                timestamp = int(time.time() * 1000)  # Millisecond timestamp
+                segment_files = []  # List to track segment audio files
                 
+                # Process each segment sequentially
                 for i, segment in enumerate(segments):
                     print(f"Processing segment {i+1}/{len(segments)}: {segment[:30]}...")
                     
@@ -539,8 +543,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception as tts_err:
                         print(f"Error in TTS generation for segment {i+1}: {tts_err}")
                         # Use tts_to_file as a fallback if direct TTS fails
-                        timestamp = int(time.time())
-                        fallback_wav_path = f"outputs/fallback_{timestamp}_{i}.wav"
+                        fallback_timestamp = int(time.time())
+                        fallback_wav_path = f"outputs/fallback_{fallback_timestamp}_{i}.wav"
                         
                         if language == "en":
                             global_tts.tts_to_file(text=segment, file_path=fallback_wav_path)
@@ -565,6 +569,16 @@ async def websocket_endpoint(websocket: WebSocket):
                     if not isinstance(wav, np.ndarray) or wav.ndim == 0:
                         print("Converting scalar to 1D array")
                         wav = np.array([wav.item() if hasattr(wav, 'item') else float(wav)], dtype=np.int16)
+                    
+                    # Save segment audio in background (don't wait for it)
+                    segment_filename = f"{timestamp}-{i+1}.{audio_format}"
+                    segment_path = f"outputs/{segment_filename}"
+                    segment_files.append(segment_path)  # Track for later combining
+                    
+                    # Start async task to save the segment
+                    asyncio.create_task(
+                        save_segment_audio_background(wav, segment_path, audio_format)
+                    )
                     
                     # For first segment, process and start streaming immediately
                     if i == 0:
@@ -675,25 +689,44 @@ async def websocket_endpoint(websocket: WebSocket):
                                 opus_chunk = opus_data[j:min(j + opus_chunk_size, len(opus_data))]
                                 await websocket.send_bytes(opus_chunk)
                 
-                # Save the combined audio in the background
-                timestamp = int(time.time())
-                wav_path = f"outputs/output_{timestamp}.wav"
-                opus_path = f"outputs/output_{timestamp}.opus"
+                # Full audio file path
+                full_audio_path = f"outputs/{timestamp}-full.{audio_format}"
                 
-                # Start a task to save the file in the background if needed
+                # Start a task to combine all segment files in the background
+                # But keep a reference to the task so we can wait for it before cleanup
+                combine_task = asyncio.create_task(
+                    combine_audio_segments_background(segment_files, full_audio_path, audio_format)
+                )
+                
                 # Only save info log if saveLog is true
-                if len(segments) > 1 and save_log:
+                if save_log:
                     # Create a text file with information about the segmented generation
                     info_path = f"outputs/info_{timestamp}.txt"
                     asyncio.create_task(
-                        save_tts_info_background(text, language, words_per_segment, len(segments), info_path)
+                        save_tts_info_background(text, language, words_per_segment, len(segments), info_path, segment_files, full_audio_path)
                     )
                 
                 # Send an empty chunk to signal completion
                 await websocket.send_bytes(b'')
                 
-                # Schedule WAV cleanup without waiting for it to complete
-                asyncio.create_task(async_clean_wav_files())
+                # Wait for the combination task to complete before scheduling cleanup
+                # This ensures all segments are combined before any cleanup happens
+                try:
+                    # Wait for combine task with a reasonable timeout
+                    await asyncio.wait_for(combine_task, timeout=30.0)
+                    print(f"Audio combination completed for {full_audio_path}")
+                    
+                    # Now schedule WAV cleanup without waiting for it to complete
+                    # But make sure we don't delete the segment files we just created
+                    asyncio.create_task(
+                        async_clean_wav_files(
+                            exclude_patterns=[f"{timestamp}-*.{audio_format}", f"{timestamp}-full.{audio_format}"]
+                        )
+                    )
+                except asyncio.TimeoutError:
+                    print(f"Warning: Audio combination timed out for {full_audio_path}")
+                except Exception as e:
+                    print(f"Error waiting for audio combination: {e}")
                 
             except Exception as e:
                 print(f"Error generating audio: {e}")
@@ -1222,21 +1255,171 @@ async def test_endpoint():
         "message": "API is operational"
     }
 
-# Helper function to save TTS information without regenerating audio
-async def save_tts_info_background(text, language, words_per_segment, segment_count, info_path):
+# Helper function to save segment audio
+async def save_segment_audio_background(wav_array, segment_path, audio_format):
+    try:
+        print(f"Saving segment audio to {segment_path}")
+        
+        if audio_format == "wav":
+            # Save WAV file directly
+            wavfile.write(segment_path, 22050, wav_array)
+        else:  # opus
+            # Save temporary WAV first
+            temp_wav_path = segment_path.replace(".opus", ".temp.wav")
+            wavfile.write(temp_wav_path, 22050, wav_array)
+            
+            # Convert to opus
+            convert_wav_to_opus(temp_wav_path, segment_path)
+            
+            # Remove temporary WAV
+            try:
+                os.remove(temp_wav_path)
+            except:
+                pass
+            
+    except Exception as e:
+        print(f"Error saving segment audio: {e}")
+
+# Helper function to combine audio segments
+async def combine_audio_segments_background(segment_files, full_audio_path, audio_format):
+    try:
+        print(f"Combining {len(segment_files)} segments into {full_audio_path}")
+        
+        # Give segments a longer moment to finish saving, especially for longer lists
+        await asyncio.sleep(min(1.0, 0.1 * len(segment_files)))
+        
+        # Keep track of files that actually exist
+        valid_segment_files = []
+        
+        # First verify all segment files exist
+        for segment_file in segment_files:
+            # Wait for file to exist (max 5 seconds)
+            for _ in range(50):
+                if os.path.exists(segment_file):
+                    valid_segment_files.append(segment_file)
+                    break
+                await asyncio.sleep(0.1)
+            
+            if not os.path.exists(segment_file):
+                print(f"Warning: segment file {segment_file} not found, skipping")
+        
+        print(f"Found {len(valid_segment_files)} valid segment files out of {len(segment_files)}")
+        
+        if not valid_segment_files:
+            print("No valid segment files found, cannot create combined audio")
+            return
+            
+        if audio_format == "wav":
+            # For WAV, we can concatenate PCM data
+            combined_audio = None
+            
+            for segment_file in valid_segment_files:
+                try:
+                    sample_rate, segment_audio = wavfile.read(segment_file)
+                    
+                    if combined_audio is None:
+                        combined_audio = segment_audio
+                    else:
+                        combined_audio = np.concatenate((combined_audio, segment_audio))
+                except Exception as e:
+                    print(f"Error reading segment {segment_file}: {e}")
+            
+            if combined_audio is not None:
+                wavfile.write(full_audio_path, 22050, combined_audio)
+                print(f"Saved combined WAV to {full_audio_path}")
+            
+        else:  # opus
+            # For opus, we need to use ffmpeg
+            concat_file = full_audio_path + ".txt"
+            
+            # Create a concat file for ffmpeg
+            with open(concat_file, 'w') as f:
+                for segment in valid_segment_files:
+                    f.write(f"file '{os.path.abspath(segment)}'\n")
+            
+            # Use ffmpeg to concatenate files
+            result = subprocess.run([
+                "ffmpeg",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_file,
+                "-c", "copy",
+                full_audio_path,
+                "-y"
+            ], check=False, capture_output=True)
+            
+            if result.returncode != 0:
+                print(f"Error combining opus files: {result.stderr.decode('utf-8', errors='ignore')}")
+            else:
+                print(f"Saved combined Opus to {full_audio_path} ({os.path.getsize(full_audio_path)} bytes)")
+            
+            # Remove concat file
+            try:
+                os.remove(concat_file)
+            except:
+                pass
+            
+    except Exception as e:
+        print(f"Error combining audio segments: {e}")
+
+# Updated helper function to save TTS information including segment info
+async def save_tts_info_background(text, language, words_per_segment, segment_count, info_path, segment_files=None, full_audio_path=None):
     try:
         with open(info_path, 'w', encoding='utf-8') as f:
             f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"Language: {language}\n")
             f.write(f"Words per segment: {words_per_segment}\n")
             f.write(f"Total segments: {segment_count}\n")
-            f.write(f"Text length: {len(text)} characters\n")
+            
+            if segment_files:
+                f.write("\nSegment files:\n")
+                for i, file in enumerate(segment_files):
+                    f.write(f"  {i+1}: {os.path.basename(file)}\n")
+            
+            if full_audio_path:
+                f.write(f"\nFull audio: {os.path.basename(full_audio_path)}\n")
+            
+            f.write(f"\nText length: {len(text)} characters\n")
             f.write(f"Text: {text[:1000]}")
             if len(text) > 1000:
                 f.write("...(truncated)")
         print(f"Saved TTS info to {info_path}")
     except Exception as e:
         print(f"Error saving TTS info: {e}")
+
+# Update the clean_wav_files function to accept exclude patterns
+async def async_clean_wav_files(exclude_patterns=None):
+    print("Starting cleanup process...")
+    
+    try:
+        if exclude_patterns is None:
+            exclude_patterns = []
+            
+        files = []
+        for ext in ['wav', 'opus']:
+            files.extend(glob.glob(f"outputs/*.{ext}"))
+        
+        # Filter out files matching exclude patterns
+        if exclude_patterns:
+            for pattern in exclude_patterns:
+                files = [f for f in files if not fnmatch.fnmatch(os.path.basename(f), pattern)]
+        
+        # Sort files by modification time (newest first)
+        files.sort(key=os.path.getmtime, reverse=True)
+        
+        # Keep the 5 most recent files, delete the rest
+        if len(files) > 5:
+            for file_to_delete in files[5:]:
+                try:
+                    os.remove(file_to_delete)
+                    # print(f"Deleted old audio file: {file_to_delete}")
+                except Exception as e:
+                    print(f"Error deleting file {file_to_delete}: {e}")
+        
+        print(f"Cleanup complete. Kept the {min(5, len(files))} most recent audio files.")
+    
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9002)
