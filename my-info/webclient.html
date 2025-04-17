@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Text-to-Speech WebClient</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            padding: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        #status {
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Text-to-Speech WebClient</h1>
+        <div id="status">WebSocket Status: Disconnected</div>
+        <textarea id="textInput" placeholder="Enter text to convert to speech..."></textarea>
+        <button onclick="sendText()">Convert to Speech</button>
+        <audio id="audioPlayer" controls></audio>
+    </div>
+
+    <script>
+        let ws;
+        let audioContext;
+        let audioChunks = [];
+
+        function connect() {
+            ws = new WebSocket('ws://fc3-tts.watchfun.cn/tts-stream');
+            // ws = new WebSocket('ws://localhost:9000/tts-stream');
+            
+            ws.onopen = () => {
+                document.getElementById('status').textContent = 'WebSocket Status: Connected';
+                audioChunks = []; // Reset chunks on new connection
+            };
+
+            ws.onclose = () => {
+                document.getElementById('status').textContent = 'WebSocket Status: Disconnected';
+                setTimeout(connect, 3000);
+            };
+
+            ws.onmessage = async (event) => {
+                try {
+                    if (event.data instanceof Blob) {
+                        const chunk = await event.data.arrayBuffer();
+                        if (chunk.byteLength > 0) {
+                            audioChunks.push(chunk);
+                        } else {
+                            // Empty chunk signals the end of the stream
+                            await playCompleteAudio();
+                            audioChunks = []; // Reset for next stream
+                        }
+                    } else {
+                        try {
+                            const jsonData = JSON.parse(event.data);
+                            if (jsonData.error) {
+                                alert('Error generating audio: ' + jsonData.error);
+                            }
+                        } catch (e) {
+                            console.error('Unexpected data format:', event.data);
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error processing message:', error);
+                    alert('Error processing audio data');
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                document.getElementById('status').textContent = 'WebSocket Status: Error';
+            };
+        }
+
+        async function playCompleteAudio() {
+            try {
+                // Get the raw audio data
+                const rawAudioData = concatenateAudioBuffers(audioChunks);
+                
+                // Create WAV header with correct format
+                const wavHeader = createWavHeader(rawAudioData.byteLength);
+                
+                // Combine header and audio data
+                const completeAudioBuffer = new ArrayBuffer(wavHeader.byteLength + rawAudioData.byteLength);
+                const completeView = new Uint8Array(completeAudioBuffer);
+                completeView.set(new Uint8Array(wavHeader), 0);
+                completeView.set(new Uint8Array(rawAudioData), wavHeader.byteLength);
+
+                // Create blob with correct MIME type
+                const blob = new Blob([completeAudioBuffer], {
+                    type: 'audio/wav'
+                });
+
+                // Clean up previous blob URL
+                const audioPlayer = document.getElementById('audioPlayer');
+                if (audioPlayer.src && audioPlayer.src.startsWith('blob:')) {
+                    URL.revokeObjectURL(audioPlayer.src);
+                }
+
+                // Create new blob URL and set it
+                const blobUrl = URL.createObjectURL(blob);
+                audioPlayer.src = blobUrl;
+
+                // Add event listeners for cleanup and error handling
+                audioPlayer.onended = () => {
+                    URL.revokeObjectURL(blobUrl);
+                };
+
+                audioPlayer.onerror = (e) => {
+                    console.error('Audio playback error:', e);
+                    console.error('Audio error details:', audioPlayer.error);
+                    URL.revokeObjectURL(blobUrl);
+                };
+
+                // Optional: Play using Web Audio API for better control
+                if (!audioContext) {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 22050
+                    });
+                }
+
+                const audioBuffer = await audioContext.decodeAudioData(completeAudioBuffer);
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                source.start(0);
+
+            } catch (error) {
+                console.error('Error playing audio:', error);
+                throw error;
+            }
+        }
+
+        function createWavHeader(dataLength) {
+            const header = new ArrayBuffer(44);
+            const view = new DataView(header);
+            const sampleRate = 22050;
+            const numChannels = 1;
+            const bitsPerSample = 16;
+            const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+            const blockAlign = numChannels * (bitsPerSample / 8);
+            
+            // RIFF identifier
+            writeString(view, 0, 'RIFF');
+            // File length minus RIFF header
+            view.setUint32(4, 36 + dataLength, true);
+            // RIFF type
+            writeString(view, 8, 'WAVE');
+            // Format chunk identifier
+            writeString(view, 12, 'fmt ');
+            // Format chunk length
+            view.setUint32(16, 16, true);
+            // Sample format (raw)
+            view.setUint16(20, 1, true);
+            // Channel count
+            view.setUint16(22, numChannels, true);
+            // Sample rate
+            view.setUint32(24, sampleRate, true);
+            // Byte rate (sample rate * block align)
+            view.setUint32(28, byteRate, true);
+            // Block align (channel count * bytes per sample)
+            view.setUint16(32, blockAlign, true);
+            // Bits per sample
+            view.setUint16(34, bitsPerSample, true);
+            // Data chunk identifier
+            writeString(view, 36, 'data');
+            // Data chunk length
+            view.setUint32(40, dataLength, true);
+            
+            return header;
+        }
+
+        function concatenateAudioBuffers(buffers) {
+            const totalLength = buffers.reduce((total, buffer) => total + buffer.byteLength, 0);
+            const result = new ArrayBuffer(totalLength);
+            const view = new Uint8Array(result);
+            let offset = 0;
+            
+            for (const buffer of buffers) {
+                view.set(new Uint8Array(buffer), offset);
+                offset += buffer.byteLength;
+            }
+            
+            return result;
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        function sendText() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const text = document.getElementById('textInput').value;
+                if (text.trim()) {
+                    audioChunks = []; // Reset chunks before new request
+                    ws.send(text);
+                }
+            } else {
+                alert('WebSocket is not connected. Please wait for reconnection.');
+            }
+        }
+
+        // Connect when the page loads
+        connect();
+
+        // Add cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            const audioPlayer = document.getElementById('audioPlayer');
+            if (audioPlayer.src && audioPlayer.src.startsWith('blob:')) {
+                URL.revokeObjectURL(audioPlayer.src);
+            }
+            if (audioContext) {
+                audioContext.close();
+            }
+        });
+    </script>
+</body>
+</html>
