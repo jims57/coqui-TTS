@@ -889,6 +889,16 @@ async def generate_audio_http(
         normalize_time = time.time() - normalize_start
         print(f"DEBUG: Normalization time: {normalize_time * 1000:.2f} ms")
         
+        # Create file paths for saving audio in the background
+        wav_path = f"outputs/tts_output_{timestamp}.wav"
+        opus_path = f"outputs/tts_output_{timestamp}.opus"
+        
+        # Start a background task to save the audio file
+        # This won't block the response to the client
+        asyncio.create_task(
+            save_audio_file_background(wav.copy(), wav_path, opus_path, audio_format)
+        )
+        
         # Start a background task for cleanup - don't wait for it
         cleanup_start = time.time()
         asyncio.create_task(async_clean_wav_files())
@@ -962,9 +972,7 @@ async def generate_audio_http(
         total_time = time.time() - overall_start
         print(f"DEBUG: Total endpoint processing time: {total_time * 1000:.2f} ms")
         print(f"DEBUG: Time until response ready: {total_time * 1000:.2f} ms")
-        
-        # Confirm we're using in-memory processing and not file I/O
-        print("DEBUG: Using pure in-memory audio processing, no file I/O")
+        print(f"DEBUG: Audio file will be saved to {wav_path if audio_format == 'wav' else opus_path} in background")
         
         return response
             
@@ -1032,41 +1040,34 @@ async def save_audio_file_background(wav_array, wav_path, opus_path, audio_forma
     try:
         print(f"Saving audio to {wav_path}, type: {type(wav_array)}")
         
-        # Handle scalar numpy types
-        if isinstance(wav_array, np.number):
-            wav_array = np.array([float(wav_array)])
-        
-        # Ensure wav_array is a numpy array
-        if not isinstance(wav_array, np.ndarray):
-            if isinstance(wav_array, (list, tuple)):
-                wav_array = np.array(wav_array, dtype=float)
-            else:
-                wav_array = np.array([float(wav_array)])
-        
-        # Ensure it's a 1D array
-        if wav_array.ndim == 0:
-            wav_array = np.array([wav_array.item()], dtype=float)
-        
-        # Normalize and convert to 16-bit PCM for saving
-        wav_array = np.clip(wav_array, -1, 1)
-        wav_array = (wav_array * 32767).astype(np.int16)
-        
-        print(f"Saving wav array shape: {wav_array.shape}")
-        
-        # Save WAV file
+        # Save WAV file directly using wavfile.write which expects int16 data
+        # The wav_array should already be properly normalized and converted to int16
         sample_rate = 22050
         wavfile.write(wav_path, sample_rate, wav_array)
         
-        # If opus format, convert WAV to Opus
+        # If opus format, convert WAV to Opus using FFmpeg directly
         if audio_format == "opus":
-            convert_wav_to_opus(wav_path, opus_path)
+            # Use FFmpeg to convert WAV to Opus with clean settings
+            subprocess.run(
+                [
+                    "ffmpeg", 
+                    "-i", wav_path,
+                    "-c:a", "libopus",
+                    "-b:a", "32k",
+                    "-application", "voip",
+                    "-vbr", "on",
+                    opus_path,
+                    "-y"  # Overwrite if exists
+                ],
+                check=True,
+                capture_output=True
+            )
             
             # Delete the temporary WAV file
             if os.path.exists(wav_path):
                 os.remove(wav_path)
                 
-        # Schedule cleanup after saving the file
-        asyncio.create_task(async_clean_wav_files())
+        print(f"Successfully saved audio file to {wav_path if audio_format == 'wav' else opus_path}")
     except Exception as e:
         print(f"Error saving audio file: {e}")
 
