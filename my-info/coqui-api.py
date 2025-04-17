@@ -1311,7 +1311,36 @@ async def save_segment_audio_background(wav_array, segment_path, audio_format):
         else:  # opus
             # Save temporary WAV first
             temp_wav_path = segment_path.replace(".opus", ".temp.wav")
-            wavfile.write(temp_wav_path, 22050, wav_array)
+            
+            # Only trim silence if we have valid audio
+            if len(wav_array) > 0:
+                # Make a copy to avoid modifying the original array
+                trimmed_wav = wav_array.copy()
+                
+                # Find the last non-silent sample (where absolute value is above threshold)
+                threshold = 50  # Lower threshold for silence detection
+                
+                # Check the entire file from end, don't limit to a percentage
+                # This will handle cases where silence is a large portion of the file
+                last_idx = len(trimmed_wav) - 1
+                for i in range(len(trimmed_wav) - 1, 0, -1):
+                    if abs(trimmed_wav[i]) > threshold:
+                        # Found last meaningful sample, add small buffer (30ms at 22050Hz = ~660 samples)
+                        last_idx = min(i + 660, len(trimmed_wav))
+                        break
+                
+                # Only trim if we found a clear silence section and it's not too close to the end
+                if last_idx < len(trimmed_wav) - 500:  # Only trim if there's significant silence (>500 samples)
+                    trimmed_wav = trimmed_wav[:last_idx]
+                    wavfile.write(temp_wav_path, 22050, trimmed_wav)
+                    print(f"Trimmed {len(wav_array) - len(trimmed_wav)} silent samples from end ({((len(wav_array) - len(trimmed_wav)) / len(wav_array)) * 100:.1f}% of file)")
+                else:
+                    # Just use the original audio
+                    wavfile.write(temp_wav_path, 22050, wav_array)
+                    print(f"No significant silence found at end of segment")
+            else:
+                # Just use the original audio
+                wavfile.write(temp_wav_path, 22050, wav_array)
             
             # Convert to opus
             convert_wav_to_opus(temp_wav_path, segment_path)
@@ -1374,16 +1403,156 @@ async def combine_audio_segments_background(segment_files, full_audio_path, audi
                 print(f"Saved combined WAV to {full_audio_path}")
             
         else:  # opus
-            # For opus, we need to use ffmpeg
-            concat_file = full_audio_path + ".txt"
+            # For opus, we need to use ffmpeg to decode, create overlapping segments, and re-encode
             
+            # Create temp directory for processing
+            temp_dir = f"outputs/temp_{int(time.time())}"
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            try:
+                # Extract WAV files from opus for processing
+                wav_files = []
+                
+                for i, segment in enumerate(valid_segment_files):
+                    # Create WAV file from opus
+                    wav_path = f"{temp_dir}/segment_{i}.wav"
+                    subprocess.run([
+                        "ffmpeg",
+                        "-i", segment,
+                        "-ar", "22050",  # Ensure consistent sample rate
+                        wav_path,
+                        "-y"
+                    ], check=False, capture_output=True)
+                    
+                    if os.path.exists(wav_path):
+                        wav_files.append(wav_path)
+                
+                # Create overlapping segments and combine WAV files
+                if len(wav_files) > 0:
+                    # Create intermediate overlapping WAV file
+                    overlapped_wav = f"{temp_dir}/overlapped.wav"
+                    
+                    # Create list of overlapping segments
+                    overlapped_segments = []
+                    
+                    # Process the wav files to create overlapping segments
+                    for i, wav_file in enumerate(wav_files):
+                        try:
+                            sample_rate, audio = wavfile.read(wav_file)
+                            
+                            # Skip empty files
+                            if len(audio) == 0:
+                                continue
+                                
+                            # Add to list for overlapping
+                            overlapped_segments.append(audio)
+                        except Exception as e:
+                            print(f"Error processing WAV file {wav_file}: {e}")
+                    
+                    # Combine with overlap
+                    if len(overlapped_segments) > 0:
+                        combined = []
+                        overlap_samples = 550  # ~25ms overlap at 22050Hz
+                        
+                        for i, segment in enumerate(overlapped_segments):
+                            if i == 0:
+                                # First segment, add entirely
+                                combined = segment
+                            else:
+                                # For subsequent segments, overlap with previous
+                                if len(combined) > overlap_samples:
+                                    # Calculate overlap
+                                    overlap_start = len(combined) - overlap_samples
+                                    
+                                    # Crossfade weights (linear fade)
+                                    fade_in = np.linspace(0, 1, overlap_samples)
+                                    fade_out = np.linspace(1, 0, overlap_samples)
+                                    
+                                    # Apply crossfade to overlapping region
+                                    overlap_region = combined[overlap_start:] * fade_out + segment[:overlap_samples] * fade_in
+                                    
+                                    # Combine: previous audio (excluding overlap) + crossfaded overlap + new segment
+                                    combined = np.concatenate([combined[:overlap_start], overlap_region, segment[overlap_samples:]])
+                                else:
+                                    # If previous segment too short, just concatenate
+                                    combined = np.concatenate([combined, segment])
+                        
+                        # Save the combined WAV
+                        wavfile.write(overlapped_wav, 22050, combined.astype(np.int16))
+                        
+                        # Convert to final opus
+                        subprocess.run([
+                            "ffmpeg",
+                            "-i", overlapped_wav,
+                            "-c:a", "libopus",
+                            "-b:a", "32k",
+                            "-application", "voip",
+                            "-vbr", "on",
+                            full_audio_path,
+                            "-y"
+                        ], check=False, capture_output=True)
+                        
+                        print(f"Saved combined Opus to {full_audio_path} with crossfaded overlaps")
+                    else:
+                        # Fallback to simple concat
+                        print("No valid overlapped segments, falling back to simple concatenation")
+                        # Create a concat file for ffmpeg
+                        concat_file = f"{temp_dir}/concat.txt"
+                        with open(concat_file, 'w') as f:
+                            for segment in valid_segment_files:
+                                f.write(f"file '{os.path.abspath(segment)}'\n")
+                        
+                        # Use ffmpeg to concatenate files
+                        subprocess.run([
+                            "ffmpeg",
+                            "-f", "concat",
+                            "-safe", "0",
+                            "-i", concat_file,
+                            "-c", "copy",
+                            full_audio_path,
+                            "-y"
+                        ], check=False, capture_output=True)
+                else:
+                    # Fallback to simple concat if WAV extraction fails
+                    print("No valid WAV files, falling back to simple concatenation")
+                    # Create a concat file for ffmpeg
+                    concat_file = f"{temp_dir}/concat.txt"
+                    with open(concat_file, 'w') as f:
+                        for segment in valid_segment_files:
+                            f.write(f"file '{os.path.abspath(segment)}'\n")
+                    
+                    # Use ffmpeg to concatenate files
+                    subprocess.run([
+                        "ffmpeg",
+                        "-f", "concat",
+                        "-safe", "0",
+                        "-i", concat_file,
+                        "-c", "copy",
+                        full_audio_path,
+                        "-y"
+                    ], check=False, capture_output=True)
+                
+            finally:
+                # Clean up temp directory
+                try:
+                    for file in os.listdir(temp_dir):
+                        os.remove(os.path.join(temp_dir, file))
+                    os.rmdir(temp_dir)
+                except Exception as e:
+                    print(f"Error cleaning up temp directory: {e}")
+            
+    except Exception as e:
+        print(f"Error combining audio segments: {e}")
+        # Fallback to original basic method if everything else fails
+        try:
             # Create a concat file for ffmpeg
+            concat_file = full_audio_path + ".txt"
             with open(concat_file, 'w') as f:
                 for segment in valid_segment_files:
                     f.write(f"file '{os.path.abspath(segment)}'\n")
             
             # Use ffmpeg to concatenate files
-            result = subprocess.run([
+            subprocess.run([
                 "ffmpeg",
                 "-f", "concat",
                 "-safe", "0",
@@ -1393,19 +1562,10 @@ async def combine_audio_segments_background(segment_files, full_audio_path, audi
                 "-y"
             ], check=False, capture_output=True)
             
-            if result.returncode != 0:
-                print(f"Error combining opus files: {result.stderr.decode('utf-8', errors='ignore')}")
-            else:
-                print(f"Saved combined Opus to {full_audio_path} ({os.path.getsize(full_audio_path)} bytes)")
-            
             # Remove concat file
-            try:
-                os.remove(concat_file)
-            except:
-                pass
-            
-    except Exception as e:
-        print(f"Error combining audio segments: {e}")
+            os.remove(concat_file)
+        except Exception as inner_e:
+            print(f"Fallback concatenation also failed: {inner_e}")
 
 # Updated helper function to save TTS information including segment info
 async def save_tts_info_background(text, language, words_per_segment, segment_count, info_path, segment_files=None, full_audio_path=None):
