@@ -668,34 +668,13 @@ async def websocket_endpoint(websocket: WebSocket):
                 opus_path = f"outputs/output_{timestamp}.opus"
                 
                 # Start a task to save the file in the background if needed
-                # This can be useful for logging/debugging
+                # Instead of regenerating the entire audio, we'll simply save a filename for logging
                 if len(segments) > 1:
-                    # Generate the complete audio for saving in the background
-                    try:
-                        if language == "en":
-                            # Use FastPitch for English text
-                            with torch.inference_mode():
-                                wav_array = global_tts.tts(text=text)
-                        else:
-                            # Use XTTS v2 for other supported languages
-                            with torch.inference_mode():
-                                wav_array = global_chinese_tts.tts(
-                                    text=text,
-                                    speaker_wav=sample_wav_path,
-                                    language=language
-                                )
-                        
-                        # Ensure wav is a properly formatted numpy array
-                        wav_array = ensure_numpy_array(wav_array)
-                        
-                        # Start the background task with the full audio array
-                        asyncio.create_task(
-                            save_audio_file_background(wav_array, wav_path, opus_path, audio_format)
-                        )
-                    except Exception as e:
-                        print(f"Error generating full audio for background save: {e}")
-                        # If we can't generate the full audio, don't try to save it
-                        pass
+                    # Create a text file with information about the segmented generation
+                    info_path = f"outputs/info_{timestamp}.txt"
+                    asyncio.create_task(
+                        save_tts_info_background(text, language, words_per_segment, len(segments), info_path)
+                    )
                 
                 # Send an empty chunk to signal completion
                 await websocket.send_bytes(b'')
@@ -1230,6 +1209,21 @@ async def test_endpoint():
         "message": "API is operational"
     }
 
+# Helper function to save TTS information without regenerating audio
+async def save_tts_info_background(text, language, words_per_segment, segment_count, info_path):
+    try:
+        with open(info_path, 'w', encoding='utf-8') as f:
+            f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Language: {language}\n")
+            f.write(f"Words per segment: {words_per_segment}\n")
+            f.write(f"Total segments: {segment_count}\n")
+            f.write(f"Text length: {len(text)} characters\n")
+            f.write(f"Text: {text[:1000]}")
+            if len(text) > 1000:
+                f.write("...(truncated)")
+        print(f"Saved TTS info to {info_path}")
+    except Exception as e:
+        print(f"Error saving TTS info: {e}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9002)
