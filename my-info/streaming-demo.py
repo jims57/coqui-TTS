@@ -12,9 +12,29 @@ os.makedirs("outputs", exist_ok=True)
 
 print("Loading model...")
 config = XttsConfig()
+
+# Load xtts_v2 model
 config.load_json("/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/config.json")
 model = Xtts.init_from_config(config)
-model.load_checkpoint(config, checkpoint_dir="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/", use_deepspeed=use_deepspeed)
+model.load_checkpoint(config, checkpoint_dir="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/", checkpoint_path="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/model.pth", use_deepspeed=use_deepspeed)
+
+# Load xtts_v1 model
+# config.load_json("/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v1.1/config.json")
+# model = Xtts.init_from_config(config)
+# model.load_checkpoint(config, checkpoint_dir="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v1.1", checkpoint_path="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v1.1/model.pth", use_deepspeed=use_deepspeed)
+
+
+# Load ljspeech/fast_pitch model
+# config.load_json("/root/.local/share/tts/tts_models--en--ljspeech--fast_pitch/config.json")
+# model = Xtts.init_from_config(config)
+# model.load_checkpoint(config, checkpoint_dir="/root/.local/share/tts/tts_models--en--ljspeech--fast_pitch/", checkpoint_path="/root/.local/share/tts/tts_models--en--ljspeech--fast_pitch/model_file.pth", use_deepspeed=use_deepspeed)
+
+
+# Load tacotron2-DDC-GST model #[Not work]
+# config.load_json("/root/.local/share/tts/tts_models--zh-CN--baker--tacotron2-DDC-GST/config.json")
+# model = Xtts.init_from_config(config)
+# model.load_checkpoint(config, checkpoint_dir="/root/.local/share/tts/tts_models--zh-CN--baker--tacotron2-DDC-GST/", checkpoint_path="/root/.local/share/tts/tts_models--zh-CN--baker--tacotron2-DDC-GST/model_file.pth", use_deepspeed=use_deepspeed)
+
 model.cuda()
 
 # Add log message about DeepSpeed usage - modified version
@@ -34,9 +54,9 @@ print("Inference...")
 t0 = time.time()
 chunks = model.inference_stream(
     #【Chinese usage】
-    "昨天我在书店发现了一本很有趣的小说，立刻就买下来了。",
+    # "昨天我在书店发现了一本很有趣的小说，立刻就买下来了。",
     # "有时候我觉得生活就像一场冒险，我们都在不断探索新的可能性。", #[ok]
-    # "青石板上泛着水光，雨丝斜斜地织着帘子。我撑一把油纸伞，踩着湿润的石板路，听脚步声在巷子里轻轻回响。",#[err: 轻轻回响, jitter]
+    "青石板上泛着水光，雨丝斜斜地织着帘子。我撑一把油纸伞，踩着湿润的石板路，听脚步声在巷子里轻轻回响。",#[err: 轻轻回响, jitter]
     # "从最小的亚原子粒子到浩瀚的星系，一切都以微妙的因果之舞相互连接。", #[ok]
     # "世界是一幅由无数不同色彩的丝线编织而成的挂毯，每一根丝线都为存在的整体复杂性和美丽贡献着力量。从最小的亚原子粒子到浩瀚的星系，一切都以微妙的因果之舞相互连接。",
     # "世界是一幅由无数不同色彩的丝线编织而成的挂毯，每一根丝线都为存在的整体复杂性和美丽贡献着力量。从最小的亚原子粒子到浩瀚的星系，一切都以微妙的因果之舞相互连接。生命以其无数种形式在全球繁荣生长，适应着不同的环境，并不断进化以应对不断变化的条件。人类的经验是这宏伟设计中一个独特的方面，其特点是卓越的思考、情感和创造力。",

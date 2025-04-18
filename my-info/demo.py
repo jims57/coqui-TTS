@@ -35,13 +35,12 @@ print(TTS().list_models())
 
 # ==== Example: [Multi-lingual] xtts_v2 ==
 # Init TTS
-tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+# tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
 
-print(tts.languages)
-print('=== speakers ===')
+# print(tts.languages)
+# print('=== speakers ===')
 # print(tts.speakers)
 
-# Run TTS
 # ❗ Since this model is multi-lingual voice cloning model, we must set the target speaker_wav and language
 # Text to speech list of amplitude values as output
 #wav = tts.tts(text="Hello world!", speaker_wav="speaker_wavs/andy-liu-en-1.wav", language="en")
@@ -53,7 +52,7 @@ print('=== speakers ===')
 # tts.tts_to_file(text="The sun sets behind the mountains, casting long shadows across the valley.", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="en", file_path="output.wav")
 
 # (work)Jack Ma(zh)
-tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh", file_path="output.wav")
+# tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh", file_path="output.wav")
 
 # (work)Jack Ma(zh-cn)
 # tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh-cn", file_path="output.wav")
@@ -63,6 +62,15 @@ tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地�
 # tts.tts_to_file(text="彼は午後、窓際の心地よい肘掛け椅子に座って、面白い小説を夢中で読んでいた。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="ja", file_path="output.wav")
 
 
+# ==== Example: xtts_v1.1 ====
+tts = TTS("tts_models/multilingual/multi-dataset/xtts_v1.1").to(device)
+tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh", file_path="output.wav")
+
 # ==== Example: (work)Use Chinese model(tacotron2-DDC-GST) ====
 # tts = TTS("tts_models/zh-CN/baker/tacotron2-DDC-GST").to(device)
-# tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", file_path="output.wav")
+# tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav")
+
+# ==== Example: tts_models/en/ljspeech/fast_pitch ====
+# tts = TTS("tts_models/en/ljspeech/fast_pitch").to(device)
+# tts.tts_to_file(text="Children played happily in the park while their parents watched from nearby benches.", file_path="output.wav")
+
