@@ -1069,13 +1069,40 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                             # Send WAV data
                             await websocket.send_bytes(wav_data)
                         else:  # opus
-                            # Create in-memory Opus file
-                            opus_buffer = io.BytesIO()
-                            torchaudio.save(opus_buffer, chunk_audio, 24000, format="opus")
-                            opus_buffer.seek(0)
-                            opus_data = opus_buffer.read()
+                            # For better quality Opus, use FFmpeg with optimized parameters
+                            # First, save the tensor to a temporary WAV file in memory
+                            wav_buffer = io.BytesIO()
+                            torchaudio.save(wav_buffer, chunk_audio, 24000, format="wav")
+                            wav_buffer.seek(0)
                             
-                            # Send Opus data
+                            # Create a subprocess for FFmpeg with higher quality settings
+                            process = subprocess.Popen(
+                                [
+                                    "ffmpeg",
+                                    "-f", "wav",         # Input is WAV format
+                                    "-i", "pipe:0",      # Read from stdin
+                                    "-c:a", "libopus",   # Use Opus codec
+                                    "-b:a", "36k",       # Slightly higher bitrate for better quality
+                                    "-compression_level", "10",  # Maximum compression quality
+                                    "-application", "audio",     # 'audio' mode for better speech quality
+                                    "-vbr", "on",        # Variable bitrate
+                                    "-frame_duration", "20",     # Lower frame duration for better quality
+                                    "-f", "opus",        # Output format
+                                    "pipe:1"             # Output to stdout
+                                ],
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            
+                            # Send the WAV data to ffmpeg and get optimized opus data
+                            opus_data, stderr = process.communicate(input=wav_buffer.read())
+                            
+                            if process.returncode != 0:
+                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                continue
+                            
+                            # Send the optimized Opus data
                             await websocket.send_bytes(opus_data)
                     
                 # Full audio file path
@@ -1142,10 +1169,38 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
             # XTTS model outputs at 24kHz - this is the key part matching streaming-demo.py
             sample_rate = 24000
             
-            # Use torchaudio to save directly (matching streaming-demo.py)
-            import torchaudio
-            torchaudio.save(chunk_path, chunk_audio, sample_rate, format=audio_format)
-            print(f"Saved audio chunk using torchaudio with format {audio_format}")
+            if audio_format == "wav":
+                # Use torchaudio to save WAV directly
+                import torchaudio
+                torchaudio.save(chunk_path, chunk_audio, sample_rate, format="wav")
+                print(f"Saved WAV audio chunk using torchaudio")
+            else:  # opus
+                # For better Opus quality, save WAV first then convert with FFmpeg
+                import torchaudio
+                temp_wav_path = chunk_path.replace(".opus", ".temp.wav")
+                torchaudio.save(temp_wav_path, chunk_audio, sample_rate, format="wav")
+                
+                # Use FFmpeg to convert with optimized parameters
+                subprocess.run([
+                    "ffmpeg",
+                    "-i", temp_wav_path,
+                    "-c:a", "libopus",
+                    "-b:a", "36k",  # Slightly higher bitrate
+                    "-compression_level", "10",  # Maximum quality
+                    "-application", "audio",  # Better for speech
+                    "-vbr", "on",
+                    "-frame_duration", "20",  # Lower for better quality
+                    chunk_path,
+                    "-y"  # Overwrite if exists
+                ], check=False, capture_output=True)
+                
+                # Remove temporary WAV file
+                try:
+                    os.remove(temp_wav_path)
+                except:
+                    pass
+                    
+                print(f"Saved Opus audio chunk using FFmpeg with optimized quality")
         else:
             print(f"Error: chunk is not a tensor, got {type(chunk)}")
     except Exception as e:
