@@ -618,13 +618,19 @@ class Xtts(BaseTTS):
         stream_chunk_size=20,
         overlap_wav_len=1024,
         # GPT inference
-        temperature=0.75,
+        temperature=0.75,  # Controls randomness in generation: higher values (e.g., 1.0) increase diversity but may reduce quality,
+                           # lower values (e.g., 0.3) make output more deterministic and focused. Default 0.75 balances creativity and coherence.
         length_penalty=1.0,
-        repetition_penalty=10.0,
+        repetition_penalty=10.0,  # Controls how much to penalize repetitions: higher values (e.g., 10.0) strongly discourage the model from repeating the same phrases,
+                                  # while lower values (e.g., 1.0, which is neutral) allow more repetition. Default 10.0 helps prevent stuttering or loops.
+                                  # Example: repetition_penalty=2.0 for mild prevention, repetition_penalty=15.0 for strict prevention of repetitions
         top_k=50,
         top_p=0.85,
-        do_sample=True,
-        speed=1.0,
+        do_sample=True,  # Controls whether to use sampling or greedy decoding: True enables sampling based on temperature/top_k/top_p,
+                         # False uses greedy decoding (always selecting highest probability token). Default True enables natural variation.
+                         # Example: do_sample=False for deterministic output, do_sample=True with temperature=0.7 for controlled randomness
+        speed=1.0,  # Controls the speed of speech: higher values (e.g., 1.5) make speech faster, lower values (e.g., 0.8) make it slower.
+                    # Default 1.0 represents normal speed. Technically implemented as 1.0/speed for length_scale calculation.
         enable_text_splitting=False,
         **hf_generate_kwargs,
     ):
