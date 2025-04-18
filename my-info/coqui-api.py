@@ -787,6 +787,447 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
         except:
             pass
 
+# This is the streaming TTS endpoint based on XTTS v2 model official demo
+@app.websocket("/streaming-tts")
+async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[str] = Query(None)):
+    print("WebSocket Streaming TTS connection attempt")
+    
+    await websocket.accept()
+    try:
+        # Extract API key from query parameters first
+        if not api_key:
+            # Extract API key from headers (case-insensitive) as fallback
+            headers = dict(websocket.headers)
+            print(f"WebSocket headers received: {headers}")
+            
+            # Find API key in headers (case-insensitive)
+            api_key = None
+            language = "en"  # Default language
+            audio_format = "opus"  # Default audio format
+            words_per_segment = DEFAULT_WORDS_PER_SEGMENT  # Default words per segment
+            save_log = False  # Default to not saving logs
+            
+            for key, value in headers.items():
+                key_lower = key.lower()
+                if key_lower == API_KEY_NAME.lower():
+                    api_key = value
+                elif key_lower == "language":
+                    language = value.lower()
+                elif key_lower == "audioformat":
+                    audio_format = value.lower()
+                elif key_lower == "wordspersegment":
+                    try:
+                        words_per_segment = int(value)
+                        # Ensure at least 1 word per segment
+                        words_per_segment = max(1, words_per_segment)
+                    except ValueError:
+                        # If not a valid integer, use default
+                        words_per_segment = DEFAULT_WORDS_PER_SEGMENT
+                elif key_lower == "savelog":
+                    # Only set to True if value is exactly "true" (case-insensitive)
+                    save_log = value.lower() == "true"
+        else:
+            # Initialize default values when api_key is provided in query parameters
+            language = "en"
+            audio_format = "opus"
+            words_per_segment = DEFAULT_WORDS_PER_SEGMENT
+            save_log = False
+        
+        # For demo purposes, use a default API key if none provided
+        if not api_key:
+            api_key = "sk-1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t"  # Use one of your valid API keys
+            
+        print(f"API key extracted: {api_key}")
+        
+        # Validate audio format
+        if audio_format not in ["wav", "opus"]:
+            error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
+            await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
+            await websocket.close(1008)
+            return
+        
+        # Check if the API key is valid
+        if not api_key or api_key not in API_KEYS:
+            print(f"Invalid API key: {api_key}")
+            error = ERROR_CODES["INVALID_API_KEY"]
+            await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
+            await websocket.close(1008)  # Policy violation close code
+            return
+            
+        print(f"Valid API key from user: {API_KEYS[api_key]['user']}")
+        
+        # Validate language
+        if language != "en" and language not in SUPPORTED_LANGUAGES:
+            error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
+            await websocket.send_json({
+                "errorCode": error["errorCode"], 
+                "message": f"{error['message']}: {language}"
+            })
+            await websocket.close(1008)
+            return
+            
+        while True:
+            # Receive message as JSON
+            data = await websocket.receive_text()
+            try:
+                # Try to parse as JSON
+                message = json.loads(data)
+                text = message.get("text", "")
+                
+                # Check if there's a config flag in the message and skip text processing
+                if message.get("config", False):
+                    # This is a configuration message, not a text to process
+                    print("Received configuration message, skipping TTS processing")
+                    continue
+                
+                # Check if text is empty or only whitespace
+                if not text or text.isspace():
+                    print("Error: Empty text received")
+                    error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                    await websocket.send_json({
+                        "errorCode": error["errorCode"], 
+                        "message": "Empty text received. Please provide text to convert to speech."
+                    })
+                    continue
+                
+                # If language is provided in message, it overrides the header
+                message_language = message.get("language")
+                if message_language:
+                    language = message_language.lower()
+                # If audioFormat is provided in message, it overrides the header
+                message_audio_format = message.get("audioFormat")
+                if message_audio_format:
+                    audio_format = message_audio_format.lower()
+                # If wordsPerSegment is provided in message, it overrides the header
+                message_words_per_segment = message.get("wordsPerSegment")
+                if message_words_per_segment is not None:
+                    try:
+                        words_per_segment = int(message_words_per_segment)
+                        # Ensure at least 1 word per segment
+                        words_per_segment = max(1, words_per_segment)
+                    except ValueError:
+                        # If not a valid integer, keep current value
+                        pass
+                # If saveLog is provided in message, it overrides the header
+                message_save_log = message.get("saveLog")
+                if message_save_log is not None:
+                    # Only set to True if value is exactly true (boolean) or "true" (string)
+                    if isinstance(message_save_log, bool):
+                        save_log = message_save_log
+                    elif isinstance(message_save_log, str):
+                        save_log = message_save_log.lower() == "true"
+                
+                # Validate audio format again in case it was changed in the message
+                if audio_format not in ["wav", "opus"]:
+                    error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
+                    await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
+                    continue
+            except json.JSONDecodeError:
+                # If not JSON, assume it's just text
+                text = data
+                
+                # Check if text is empty or only whitespace
+                if not text or text.isspace():
+                    print("Error: Empty text received")
+                    error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                    await websocket.send_json({
+                        "errorCode": error["errorCode"], 
+                        "message": "Empty text received. Please provide text to convert to speech."
+                    })
+                    continue
+            
+            if text.startswith('[') and text.endswith(']'):
+                text = text.strip('[]').strip('"\'')
+            
+            print(f"Processing text: {text} with language: {language}, format: {audio_format}, words per segment: {words_per_segment}")
+            
+            try:
+                # Validate language again in case it was changed in the message
+                if language != "en" and language not in SUPPORTED_LANGUAGES:
+                    error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
+                    await websocket.send_json({
+                        "errorCode": error["errorCode"], 
+                        "message": f"{error['message']}: {language}"
+                    })
+                    continue
+                
+                # Check for language mismatch
+                detected_lang = detect_language(text)
+                if detected_lang and language == "en" and detected_lang != "en":
+                    detected_lang_name = SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)
+                    error = ERROR_CODES["LANGUAGE_MISMATCH"]
+                    await websocket.send_json({
+                        "errorCode": error["errorCode"], 
+                        "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"
+                    })
+                    continue
+                
+                # Use XTTS v2 model to generate audio streams
+                timestamp = int(time.time() * 1000)  # Millisecond timestamp
+                
+                # Get model from config
+                from TTS.tts.configs.xtts_config import XttsConfig
+                from TTS.tts.models.xtts import Xtts
+                
+                # Create an XTTS model instance specifically for streaming
+                config = XttsConfig()
+                config.load_json("/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/config.json")
+                model = Xtts.init_from_config(config)
+                model.load_checkpoint(
+                    config, 
+                    checkpoint_dir="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/",
+                    checkpoint_path="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/model.pth",
+                    use_deepspeed=True
+                )
+                model.cuda()
+                
+                # Compute speaker latents
+                start_time = time.time()
+                print("Computing speaker latents...")
+                with torch.inference_mode():
+                    gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(audio_path=[sample_wav_path])
+                
+                print(f"Speaker latents computed in {(time.time() - start_time) * 1000:.2f} ms")
+                
+                # Start streaming inference
+                print("Starting streaming inference...")
+                chunk_files = []  # List to track chunk audio files
+                
+                # Use the XTTS V2 model's streaming capability
+                stream_chunks = model.inference_stream(
+                    text=text,
+                    language=language,
+                    gpt_cond_latent=gpt_cond_latent,
+                    speaker_embedding=speaker_embedding,
+                    stream_chunk_size=10,  # Similar to streaming-demo.py
+                    overlap_wav_len=1024,  # Similar to streaming-demo.py
+                    temperature=0.1,
+                    length_penalty=1.0,
+                    repetition_penalty=90.0,
+                    top_k=50,
+                    speed=1.0,
+                    enable_text_splitting=True
+                )
+                
+                first_chunk = True
+                for i, chunk in enumerate(stream_chunks):
+                    # Track timing info
+                    chunk_time = (time.time() - start_time) * 1000  # Time in milliseconds
+                    if first_chunk:
+                        first_chunk_time = chunk_time
+                        print(f"Time to first chunk: {first_chunk_time:.2f} ms")
+                        first_chunk = False
+                    
+                    # Save the chunk to a file for combining later
+                    chunk_filename = f"outputs/{timestamp}-{i+1}.{audio_format}"
+                    chunk_files.append(chunk_filename)
+                    
+                    # Start a task to save the chunk in the background
+                    asyncio.create_task(
+                        save_audio_chunk_background(chunk, chunk_filename, audio_format)
+                    )
+                    
+                    # Convert the pytorch tensor to numpy array and prepare for streaming
+                    if isinstance(chunk, torch.Tensor):
+                        chunk = chunk.squeeze().cpu().numpy()
+                    
+                    # Normalize and convert to 16-bit PCM for streaming
+                    chunk = np.clip(chunk, -1, 1)
+                    chunk = (chunk * 32767).astype(np.int16)
+                    
+                    print(f"Streaming chunk {i+1} with shape {chunk.shape}")
+                    
+                    # Stream the chunk based on the requested format
+                    if audio_format == "wav":
+                        # Stream raw PCM data
+                        chunk_bytes = chunk.tobytes()
+                        await websocket.send_bytes(chunk_bytes)
+                    else:  # opus
+                        # Create a subprocess for FFmpeg
+                        process = subprocess.Popen(
+                            [
+                                "ffmpeg",
+                                "-f", "s16le",      # 16-bit PCM input
+                                "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                "-ac", "1",         # Mono
+                                "-i", "pipe:0",     # Read from stdin
+                                "-c:a", "libopus",
+                                "-b:a", "32k",
+                                "-application", "voip",
+                                "-vbr", "on",
+                                "-f", "opus",
+                                "pipe:1"            # Output to stdout
+                            ],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE
+                        )
+                        
+                        # Send the PCM data to ffmpeg
+                        opus_data, stderr = process.communicate(input=chunk.tobytes())
+                        
+                        if process.returncode != 0:
+                            print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                            continue
+                        
+                        # Stream the opus data
+                        await websocket.send_bytes(opus_data)
+                
+                # Full audio file path
+                full_audio_path = f"outputs/{timestamp}-full.{audio_format}"
+                
+                # Start a task to combine all chunk files in the background
+                combine_task = asyncio.create_task(
+                    combine_audio_chunks_background(chunk_files, full_audio_path, audio_format)
+                )
+                
+                # Only save info log if saveLog is true
+                if save_log:
+                    # Create a text file with information about the chunked generation
+                    info_path = f"outputs/info_{timestamp}.txt"
+                    asyncio.create_task(
+                        save_tts_info_background(text, language, words_per_segment, len(chunk_files), info_path, chunk_files, full_audio_path)
+                    )
+                
+                # Send an empty chunk to signal completion
+                await websocket.send_bytes(b'')
+                
+                # Wait for the combination task to complete before scheduling cleanup
+                try:
+                    # Wait for combine task with a reasonable timeout
+                    await asyncio.wait_for(combine_task, timeout=30.0)
+                    print(f"Audio combination completed for {full_audio_path}")
+                    
+                    # Schedule WAV cleanup without waiting for it to complete
+                    asyncio.create_task(
+                        async_clean_wav_files(
+                            exclude_patterns=[f"{timestamp}-*.{audio_format}", f"{timestamp}-full.{audio_format}"]
+                        )
+                    )
+                except asyncio.TimeoutError:
+                    print(f"Warning: Audio combination timed out for {full_audio_path}")
+                except Exception as e:
+                    print(f"Error waiting for audio combination: {e}")
+                
+            except Exception as e:
+                print(f"Error generating audio: {e}")
+                error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"], "details": str(e)})
+    except WebSocketDisconnect:
+        print("Client disconnected")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        try:
+            error = ERROR_CODES["WEBSOCKET_ERROR"]
+            await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"], "details": str(e)})
+            await websocket.close()
+        except:
+            pass
+
+# Helper function to save audio chunk from pytorch tensor
+async def save_audio_chunk_background(chunk, chunk_path, audio_format):
+    try:
+        print(f"Saving audio chunk to {chunk_path}")
+        
+        # Convert PyTorch tensor to proper format for saving
+        if isinstance(chunk, torch.Tensor):
+            # Move to CPU and ensure it's the right shape
+            chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
+            
+            # XTTS model outputs at 24kHz
+            sample_rate = 24000
+            
+            # Save directly as WAV or opus
+            if audio_format == "wav":
+                # Use torchaudio to save as WAV
+                import torchaudio
+                torchaudio.save(chunk_path, chunk_audio, sample_rate)
+            else:  # opus
+                # Use torchaudio with opus format
+                import torchaudio
+                torchaudio.save(chunk_path, chunk_audio, sample_rate, format="opus")
+        else:
+            print(f"Error: chunk is not a tensor, got {type(chunk)}")
+    except Exception as e:
+        print(f"Error saving audio chunk: {e}")
+
+# Helper function to combine audio chunks
+async def combine_audio_chunks_background(chunk_files, full_audio_path, audio_format):
+    try:
+        print(f"Combining {len(chunk_files)} chunks into {full_audio_path}")
+        
+        # Give chunks a longer moment to finish saving, especially for longer lists
+        await asyncio.sleep(min(1.0, 0.1 * len(chunk_files)))
+        
+        # Keep track of files that actually exist
+        valid_chunk_files = []
+        
+        # First verify all chunk files exist
+        for chunk_file in chunk_files:
+            # Wait for file to exist (max 5 seconds)
+            for _ in range(50):
+                if os.path.exists(chunk_file):
+                    valid_chunk_files.append(chunk_file)
+                    break
+                await asyncio.sleep(0.1)
+            
+            if not os.path.exists(chunk_file):
+                print(f"Warning: chunk file {chunk_file} not found, skipping")
+        
+        print(f"Found {len(valid_chunk_files)} valid chunk files out of {len(chunk_files)}")
+        
+        if not valid_chunk_files:
+            print("No valid chunk files found, cannot create combined audio")
+            return
+        
+        # Use the same combining approach as in combine_audio_segments_background but adapted for chunks
+        if audio_format == "wav":
+            # For WAV format, we can concatenate tensors and save
+            import torchaudio
+            chunks = []
+            
+            for chunk_file in valid_chunk_files:
+                try:
+                    waveform, sample_rate = torchaudio.load(chunk_file)
+                    chunks.append(waveform)
+                except Exception as e:
+                    print(f"Error loading chunk {chunk_file}: {e}")
+            
+            if chunks:
+                # Concatenate all chunks
+                combined = torch.cat(chunks, dim=1)
+                # Save the combined audio
+                torchaudio.save(full_audio_path, combined, sample_rate)
+                print(f"Saved combined WAV to {full_audio_path}")
+            
+        else:  # opus
+            # For opus, use ffmpeg to concatenate
+            concat_file = f"{full_audio_path}.txt"
+            with open(concat_file, 'w') as f:
+                for chunk_file in valid_chunk_files:
+                    f.write(f"file '{os.path.abspath(chunk_file)}'\n")
+            
+            # Use ffmpeg to concatenate files
+            subprocess.run([
+                "ffmpeg",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_file,
+                "-c", "copy",
+                full_audio_path,
+                "-y"
+            ], check=False, capture_output=True)
+            
+            # Remove concat file
+            try:
+                os.remove(concat_file)
+            except:
+                pass
+            
+            print(f"Saved combined Opus to {full_audio_path}")
+    except Exception as e:
+        print(f"Error combining audio chunks: {e}")
+
 # Update the TTSRequest model to include language parameter
 class TTSRequest(BaseModel):
     text: str
