@@ -620,7 +620,10 @@ class Xtts(BaseTTS):
         # GPT inference
         temperature=0.75,  # Controls randomness in generation: higher values (e.g., 1.0) increase diversity but may reduce quality,
                            # lower values (e.g., 0.3) make output more deterministic and focused. Default 0.75 balances creativity and coherence.
-        length_penalty=1.0,
+        length_penalty=1.0,  # Controls how sequence length affects generation: values > 1.0 favor longer sequences,
+                             # values < 1.0 favor shorter sequences, and 1.0 is neutral. For example, length_penalty=2.0
+                             # would encourage the model to generate longer audio, while length_penalty=0.5 would make
+                             # the output more concise. Used during beam search to normalize scores by length.
         repetition_penalty=10.0,  # Controls how much to penalize repetitions: higher values (e.g., 10.0) strongly discourage the model from repeating the same phrases,
                                   # while lower values (e.g., 1.0, which is neutral) allow more repetition. Default 10.0 helps prevent stuttering or loops.
                                   # Example: repetition_penalty=2.0 for mild prevention, repetition_penalty=15.0 for strict prevention of repetitions
