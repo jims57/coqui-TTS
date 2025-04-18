@@ -1014,20 +1014,23 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 print("Starting streaming inference...")
                 chunk_files = []  # List to track chunk audio files
                 
+                # Use the same exact parameters as in streaming-demo.py for better quality
+                print(f"Using streaming parameters: temperature=0.1, length_penalty=1.0, repetition_penalty=90.0, top_k=50")
+                
                 # Use the globally loaded XTTS V2 model's streaming capability
                 stream_chunks = global_streaming_model.inference_stream(
                     text=text,
                     language=language,
                     gpt_cond_latent=gpt_cond_latent,
                     speaker_embedding=speaker_embedding,
-                    stream_chunk_size=10,  # Similar to streaming-demo.py
-                    overlap_wav_len=1024,  # Similar to streaming-demo.py
-                    temperature=0.1,
-                    length_penalty=1.0,
-                    repetition_penalty=90.0,
-                    top_k=50,
-                    speed=1.0,
-                    enable_text_splitting=True
+                    stream_chunk_size=10,  # Same as in streaming-demo.py
+                    overlap_wav_len=1024,  # Same as in streaming-demo.py
+                    temperature=0.1,       # Same as in streaming-demo.py
+                    length_penalty=1.0,    # Same as in streaming-demo.py  
+                    repetition_penalty=90.0, # Same as in streaming-demo.py
+                    top_k=50,              # Same as in streaming-demo.py
+                    speed=1.0,             # Same as in streaming-demo.py
+                    enable_text_splitting=True  # Same as in streaming-demo.py
                 )
                 
                 first_chunk = True
@@ -1152,21 +1155,16 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
         
         # Convert PyTorch tensor to proper format for saving
         if isinstance(chunk, torch.Tensor):
-            # Move to CPU and ensure it's the right shape
+            # Move to CPU and ensure it's the right shape (matches streaming-demo.py)
             chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
             
-            # XTTS model outputs at 24kHz
+            # XTTS model outputs at 24kHz - this is the key part matching streaming-demo.py
             sample_rate = 24000
             
-            # Save directly as WAV or opus
-            if audio_format == "wav":
-                # Use torchaudio to save as WAV
-                import torchaudio
-                torchaudio.save(chunk_path, chunk_audio, sample_rate)
-            else:  # opus
-                # Use torchaudio with opus format
-                import torchaudio
-                torchaudio.save(chunk_path, chunk_audio, sample_rate, format="opus")
+            # Use torchaudio to save directly (matching streaming-demo.py)
+            import torchaudio
+            torchaudio.save(chunk_path, chunk_audio, sample_rate, format=audio_format)
+            print(f"Saved audio chunk using torchaudio with format {audio_format}")
         else:
             print(f"Error: chunk is not a tensor, got {type(chunk)}")
     except Exception as e:
