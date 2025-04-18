@@ -1324,11 +1324,11 @@ async def generate_audio_http(
         # Generate audio directly in memory
         tts_start = time.time()
         if language == "en":
-            print("Using FastPitch model for English")
+            print("Using FastPitch model for English text inference")
             with torch.inference_mode():
                 wav = global_tts.tts(text=text)
         else:
-            print(f"Using XTTS model with language: {language}")
+            print(f"Using XTTS v2 model for {language} language inference")
             
             if not os.path.exists(sample_wav_path):
                 error = ERROR_CODES["REFERENCE_AUDIO_NOT_FOUND"]
