@@ -104,6 +104,10 @@ global_tts = None
 # Default number of words per TTS segment for streaming
 DEFAULT_WORDS_PER_SEGMENT = 3
 
+# Add these global variables at the top of the file, near other global variables
+global_streaming_model = None
+global_streaming_config = None
+
 def initialize_tts():
     global global_tts, global_chinese_tts
     try:
@@ -129,9 +133,33 @@ def initialize_tts():
 @app.on_event("startup")
 async def startup_event():
     """Initialize TTS models when the FastAPI app starts"""
-    global global_tts, global_chinese_tts
+    global global_tts, global_chinese_tts, global_streaming_model, global_streaming_config
+    
     if global_tts is None:
         global_tts, global_chinese_tts = initialize_tts()
+        
+    # Initialize the streaming XTTS v2 model
+    if global_streaming_model is None:
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            from TTS.tts.configs.xtts_config import XttsConfig
+            from TTS.tts.models.xtts import Xtts
+            
+            print("Initializing streaming XTTS v2 model...")
+            global_streaming_config = XttsConfig()
+            global_streaming_config.load_json("/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/config.json")
+            global_streaming_model = Xtts.init_from_config(global_streaming_config)
+            global_streaming_model.load_checkpoint(
+                global_streaming_config, 
+                checkpoint_dir="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/",
+                checkpoint_path="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/model.pth",
+                use_deepspeed=True
+            )
+            global_streaming_model.cuda()
+            print("Streaming XTTS v2 model loaded successfully")
+        except Exception as e:
+            print(f"Error loading streaming XTTS v2 model: {e}")
+    
     # Ensure outputs directory exists
     os.makedirs("outputs", exist_ok=True)
 
@@ -962,30 +990,23 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                     })
                     continue
                 
+                # Check if the streaming model is available
+                if global_streaming_model is None:
+                    error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                    await websocket.send_json({
+                        "errorCode": error["errorCode"],
+                        "message": "Streaming TTS model not initialized"
+                    })
+                    continue
+                
                 # Use XTTS v2 model to generate audio streams
                 timestamp = int(time.time() * 1000)  # Millisecond timestamp
-                
-                # Get model from config
-                from TTS.tts.configs.xtts_config import XttsConfig
-                from TTS.tts.models.xtts import Xtts
-                
-                # Create an XTTS model instance specifically for streaming
-                config = XttsConfig()
-                config.load_json("/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/config.json")
-                model = Xtts.init_from_config(config)
-                model.load_checkpoint(
-                    config, 
-                    checkpoint_dir="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/",
-                    checkpoint_path="/root/.local/share/tts/tts_models--multilingual--multi-dataset--xtts_v2/model.pth",
-                    use_deepspeed=True
-                )
-                model.cuda()
                 
                 # Compute speaker latents
                 start_time = time.time()
                 print("Computing speaker latents...")
                 with torch.inference_mode():
-                    gpt_cond_latent, speaker_embedding = model.get_conditioning_latents(audio_path=[sample_wav_path])
+                    gpt_cond_latent, speaker_embedding = global_streaming_model.get_conditioning_latents(audio_path=[sample_wav_path])
                 
                 print(f"Speaker latents computed in {(time.time() - start_time) * 1000:.2f} ms")
                 
@@ -993,8 +1014,8 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 print("Starting streaming inference...")
                 chunk_files = []  # List to track chunk audio files
                 
-                # Use the XTTS V2 model's streaming capability
-                stream_chunks = model.inference_stream(
+                # Use the globally loaded XTTS V2 model's streaming capability
+                stream_chunks = global_streaming_model.inference_stream(
                     text=text,
                     language=language,
                     gpt_cond_latent=gpt_cond_latent,
