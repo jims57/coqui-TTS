@@ -1069,40 +1069,39 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                             # Send WAV data
                             await websocket.send_bytes(wav_data)
                         else:  # opus
-                            # For better quality Opus, use FFmpeg with optimized parameters
-                            # First, save the tensor to a temporary WAV file in memory
-                            wav_buffer = io.BytesIO()
-                            torchaudio.save(wav_buffer, chunk_audio, 24000, format="wav")
-                            wav_buffer.seek(0)
-                            
-                            # Create a subprocess for FFmpeg with higher quality settings
+                            # Use the same approach as in /tts endpoint
+                            # Start FFmpeg process with the same parameters as in /tts
                             process = subprocess.Popen(
                                 [
                                     "ffmpeg",
-                                    "-f", "wav",         # Input is WAV format
-                                    "-i", "pipe:0",      # Read from stdin
-                                    "-c:a", "libopus",   # Use Opus codec
-                                    "-b:a", "36k",       # Slightly higher bitrate for better quality
-                                    "-compression_level", "10",  # Maximum compression quality
-                                    "-application", "audio",     # 'audio' mode for better speech quality
-                                    "-vbr", "on",        # Variable bitrate
-                                    "-frame_duration", "20",     # Lower frame duration for better quality
-                                    "-f", "opus",        # Output format
-                                    "pipe:1"             # Output to stdout
+                                    "-f", "s16le",      # 16-bit PCM input
+                                    "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                    "-ac", "1",         # Mono
+                                    "-i", "pipe:0",     # Read from stdin
+                                    "-c:a", "libopus",
+                                    "-b:a", "32k",
+                                    "-application", "voip",
+                                    "-vbr", "on",
+                                    "-f", "opus",
+                                    "pipe:1"            # Output to stdout
                                 ],
                                 stdin=subprocess.PIPE,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE
                             )
                             
-                            # Send the WAV data to ffmpeg and get optimized opus data
-                            opus_data, stderr = process.communicate(input=wav_buffer.read())
+                            # Convert the pytorch tensor to PCM data as done in /tts
+                            chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                            chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                            
+                            # Send the PCM data to ffmpeg and get opus data
+                            opus_data, stderr = process.communicate(input=chunk_pcm.tobytes())
                             
                             if process.returncode != 0:
                                 print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
                                 continue
                             
-                            # Send the optimized Opus data
+                            # Send the opus data
                             await websocket.send_bytes(opus_data)
                     
                 # Full audio file path
@@ -1163,33 +1162,34 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
         
         # Convert PyTorch tensor to proper format for saving
         if isinstance(chunk, torch.Tensor):
-            # Move to CPU and ensure it's the right shape (matches streaming-demo.py)
-            chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
-            
-            # XTTS model outputs at 24kHz - this is the key part matching streaming-demo.py
-            sample_rate = 24000
+            # Move to CPU and ensure it's the right shape
+            chunk_audio = chunk.squeeze().cpu().numpy()
             
             if audio_format == "wav":
-                # Use torchaudio to save WAV directly
-                import torchaudio
-                torchaudio.save(chunk_path, chunk_audio, sample_rate, format="wav")
-                print(f"Saved WAV audio chunk using torchaudio")
+                # Save WAV file directly using scipy.io.wavfile
+                # Normalize and convert to 16-bit PCM
+                chunk_audio = np.clip(chunk_audio, -1, 1)
+                chunk_audio = (chunk_audio * 32767).astype(np.int16)
+                wavfile.write(chunk_path, 24000, chunk_audio)
+                print(f"Saved WAV audio chunk")
             else:  # opus
-                # For better Opus quality, save WAV first then convert with FFmpeg
-                import torchaudio
-                temp_wav_path = chunk_path.replace(".opus", ".temp.wav")
-                torchaudio.save(temp_wav_path, chunk_audio, sample_rate, format="wav")
+                # Use the same FFmpeg approach as in /tts endpoint
+                # Normalize and convert to 16-bit PCM
+                chunk_audio = np.clip(chunk_audio, -1, 1)
+                chunk_audio = (chunk_audio * 32767).astype(np.int16)
                 
-                # Use FFmpeg to convert with optimized parameters
+                # Save as WAV first
+                temp_wav_path = chunk_path.replace(".opus", ".temp.wav")
+                wavfile.write(temp_wav_path, 24000, chunk_audio)
+                
+                # Convert to opus using identical FFmpeg parameters as /tts
                 subprocess.run([
                     "ffmpeg",
                     "-i", temp_wav_path,
                     "-c:a", "libopus",
-                    "-b:a", "36k",  # Slightly higher bitrate
-                    "-compression_level", "10",  # Maximum quality
-                    "-application", "audio",  # Better for speech
+                    "-b:a", "32k",
+                    "-application", "voip",
                     "-vbr", "on",
-                    "-frame_duration", "20",  # Lower for better quality
                     chunk_path,
                     "-y"  # Overwrite if exists
                 ], check=False, capture_output=True)
@@ -1200,7 +1200,7 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
                 except:
                     pass
                     
-                print(f"Saved Opus audio chunk using FFmpeg with optimized quality")
+                print(f"Saved Opus audio chunk using same method as /tts")
         else:
             print(f"Error: chunk is not a tensor, got {type(chunk)}")
     except Exception as e:
