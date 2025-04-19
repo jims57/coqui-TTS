@@ -1022,8 +1022,8 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 print(f"Using streaming parameters: temperature=0.1, length_penalty=1.0, repetition_penalty=90.0, top_k=50")
                 
                 # Increase these two key parameters for better streaming quality
-                stream_chunk_size = 30  # Larger chunks for better continuity (original was 10)
-                overlap_wav_len = 2048  # Double the overlap for smoother transitions (original was 1024)
+                stream_chunk_size = 10  # Larger chunks for better continuity (original was 10)
+                overlap_wav_len = 3072  # Double the overlap for smoother transitions (original was 1024)
                 
                 print(f"Using improved stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len} for better audio quality")
                 
