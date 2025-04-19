@@ -1020,13 +1020,20 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 
                 # Use the globally loaded XTTS V2 model's streaming capability
                 print(f"Using streaming parameters: temperature=0.1, length_penalty=1.0, repetition_penalty=90.0, top_k=50")
+                
+                # Increase these two key parameters for better streaming quality
+                stream_chunk_size = 30  # Larger chunks for better continuity (original was 10)
+                overlap_wav_len = 2048  # Double the overlap for smoother transitions (original was 1024)
+                
+                print(f"Using improved stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len} for better audio quality")
+                
                 stream_chunks = global_streaming_model.inference_stream(
                     text=text,
                     language=language,
                     gpt_cond_latent=gpt_cond_latent,
                     speaker_embedding=speaker_embedding,
-                    stream_chunk_size=10,
-                    overlap_wav_len=1024,
+                    stream_chunk_size=stream_chunk_size,  # Increased for better quality
+                    overlap_wav_len=overlap_wav_len,      # Increased for smoother transitions
                     temperature=0.1,
                     length_penalty=1.0,
                     repetition_penalty=90.0,
