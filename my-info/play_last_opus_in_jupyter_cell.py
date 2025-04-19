@@ -2,18 +2,20 @@ import os
 import glob
 from IPython.display import Audio, display
 
-def play_last_opus(directory):
-    """Plays the last modified .opus file in the given directory using IPython Audio."""
+def play_last_audio(directory):
+    """Plays the last modified audio file (.opus or .wav) in the given directory using IPython Audio."""
     try:
-        opus_files = glob.glob(os.path.join(directory, "*.opus"))
-        if not opus_files:
-            print(f"No .opus files found in {directory}")
+        # Look for both opus and wav files
+        audio_files = glob.glob(os.path.join(directory, "*.opus")) + glob.glob(os.path.join(directory, "*.wav"))
+        if not audio_files:
+            print(f"No audio files (.opus or .wav) found in {directory}")
             return None
 
-        last_opus_file = max(opus_files, key=os.path.getmtime)
-        print(f"Playing: {last_opus_file}")
+        # Get the most recently modified file
+        last_audio_file = max(audio_files, key=os.path.getmtime)
+        print(f"Playing: {last_audio_file}")
         # Create Audio object but don't display it yet - this prevents duplicate playback
-        audio = Audio(filename=last_opus_file, autoplay=True)
+        audio = Audio(filename=last_audio_file, autoplay=True)
         # Return the audio object without displaying it
         return audio
 
@@ -26,7 +28,7 @@ def play_last_opus(directory):
 # Specify the directory
 tts_output_dir = os.path.expanduser("~/TTS/outputs/")
 
-# Play the last opus file automatically
+# Play the last audio file automatically
 # The function returns the Audio object, and Jupyter automatically displays the last expression
 # No need to call display() as it causes duplicate audio playback
-play_last_opus(tts_output_dir)
+play_last_audio(tts_output_dir)
