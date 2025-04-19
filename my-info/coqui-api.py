@@ -815,7 +815,6 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
         except:
             pass
 
-# This is the streaming TTS endpoint based on XTTS v2 model official demo
 @app.websocket("/streaming-tts")
 async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[str] = Query(None)):
     print("WebSocket Streaming TTS connection attempt")
@@ -830,49 +829,17 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
             
             # Find API key in headers (case-insensitive)
             api_key = None
-            language = "en"  # Default language
-            audio_format = "opus"  # Default audio format
-            words_per_segment = DEFAULT_WORDS_PER_SEGMENT  # Default words per segment
-            save_log = False  # Default to not saving logs
             
             for key, value in headers.items():
                 key_lower = key.lower()
                 if key_lower == API_KEY_NAME.lower():
                     api_key = value
-                elif key_lower == "language":
-                    language = value.lower()
-                elif key_lower == "audioformat":
-                    audio_format = value.lower()
-                elif key_lower == "wordspersegment":
-                    try:
-                        words_per_segment = int(value)
-                        # Ensure at least 1 word per segment
-                        words_per_segment = max(1, words_per_segment)
-                    except ValueError:
-                        # If not a valid integer, use default
-                        words_per_segment = DEFAULT_WORDS_PER_SEGMENT
-                elif key_lower == "savelog":
-                    # Only set to True if value is exactly "true" (case-insensitive)
-                    save_log = value.lower() == "true"
-        else:
-            # Initialize default values when api_key is provided in query parameters
-            language = "en"
-            audio_format = "opus"
-            words_per_segment = DEFAULT_WORDS_PER_SEGMENT
-            save_log = False
         
         # For demo purposes, use a default API key if none provided
         if not api_key:
             api_key = "sk-1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p7q8r9s0t"  # Use one of your valid API keys
             
         print(f"API key extracted: {api_key}")
-        
-        # Validate audio format
-        if audio_format not in ["wav", "opus"]:
-            error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
-            await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
-            await websocket.close(1008)
-            return
         
         # Check if the API key is valid
         if not api_key or api_key not in API_KEYS:
@@ -884,23 +851,37 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
             
         print(f"Valid API key from user: {API_KEYS[api_key]['user']}")
         
-        # Validate language
-        if language != "en" and language not in SUPPORTED_LANGUAGES:
-            error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
-            await websocket.send_json({
-                "errorCode": error["errorCode"], 
-                "message": f"{error['message']}: {language}"
-            })
-            await websocket.close(1008)
-            return
-            
         while True:
-            # Receive message as JSON
+            # Receive message as text
             data = await websocket.receive_text()
+            
+            # Check if the received data is valid JSON
             try:
                 # Try to parse as JSON
                 message = json.loads(data)
+                
+                # Extract required parameters from the JSON
                 text = message.get("text", "")
+                language = message.get("language", "en").lower()
+                audio_format = message.get("audioFormat", "opus").lower()
+                save_log = message.get("saveLog", False)
+                words_per_segment = message.get("wordsPerSegment", DEFAULT_WORDS_PER_SEGMENT)
+                
+                # Convert wordsPerSegment to int and validate
+                if isinstance(words_per_segment, str):
+                    try:
+                        words_per_segment = int(words_per_segment)
+                    except ValueError:
+                        words_per_segment = DEFAULT_WORDS_PER_SEGMENT
+                elif not isinstance(words_per_segment, int):
+                    words_per_segment = DEFAULT_WORDS_PER_SEGMENT
+                
+                # Ensure at least 1 word per segment
+                words_per_segment = max(1, words_per_segment)
+                
+                # Convert saveLog to boolean if it's a string
+                if isinstance(save_log, str):
+                    save_log = save_log.lower() == "true"
                 
                 # Check if there's a config flag in the message and skip text processing
                 if message.get("config", False):
@@ -908,66 +889,36 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                     print("Received configuration message, skipping TTS processing")
                     continue
                 
-                # Check if text is empty or only whitespace
-                if not text or text.isspace():
-                    print("Error: Empty text received")
-                    error = ERROR_CODES["TTS_GENERATION_ERROR"]
-                    await websocket.send_json({
-                        "errorCode": error["errorCode"], 
-                        "message": "Empty text received. Please provide text to convert to speech."
-                    })
-                    continue
-                
-                # If language is provided in message, it overrides the header
-                message_language = message.get("language")
-                if message_language:
-                    language = message_language.lower()
-                # If audioFormat is provided in message, it overrides the header
-                message_audio_format = message.get("audioFormat")
-                if message_audio_format:
-                    audio_format = message_audio_format.lower()
-                # If wordsPerSegment is provided in message, it overrides the header
-                message_words_per_segment = message.get("wordsPerSegment")
-                if message_words_per_segment is not None:
-                    try:
-                        words_per_segment = int(message_words_per_segment)
-                        # Ensure at least 1 word per segment
-                        words_per_segment = max(1, words_per_segment)
-                    except ValueError:
-                        # If not a valid integer, keep current value
-                        pass
-                # If saveLog is provided in message, it overrides the header
-                message_save_log = message.get("saveLog")
-                if message_save_log is not None:
-                    # Only set to True if value is exactly true (boolean) or "true" (string)
-                    if isinstance(message_save_log, bool):
-                        save_log = message_save_log
-                    elif isinstance(message_save_log, str):
-                        save_log = message_save_log.lower() == "true"
-                
-                # Validate audio format again in case it was changed in the message
-                if audio_format not in ["wav", "opus"]:
-                    error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
-                    await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
-                    continue
             except json.JSONDecodeError:
-                # If not JSON, assume it's just text
-                text = data
-                
-                # Check if text is empty or only whitespace
-                if not text or text.isspace():
-                    print("Error: Empty text received")
-                    error = ERROR_CODES["TTS_GENERATION_ERROR"]
-                    await websocket.send_json({
-                        "errorCode": error["errorCode"], 
-                        "message": "Empty text received. Please provide text to convert to speech."
-                    })
-                    continue
+                # If not valid JSON, return error
+                print("Error: Invalid JSON format received")
+                error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                await websocket.send_json({
+                    "errorCode": error["errorCode"], 
+                    "message": "Invalid JSON format. Expected format: {\"language\": \"en\", \"audioFormat\": \"opus\", \"saveLog\": false, \"text\": \"Your text here\"}"
+                })
+                continue
+            
+            # Check if text is empty or only whitespace
+            if not text or text.isspace():
+                print("Error: Empty text received")
+                error = ERROR_CODES["TTS_GENERATION_ERROR"]
+                await websocket.send_json({
+                    "errorCode": error["errorCode"], 
+                    "message": "Empty text received. Please provide text to convert to speech."
+                })
+                continue
             
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
             
             print(f"Processing text: {text} with language: {language}, format: {audio_format}, words per segment: {words_per_segment}")
+            
+            # Validate audio format
+            if audio_format not in ["wav", "opus"]:
+                error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
+                await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
+                continue
             
             try:
                 # Validate language again in case it was changed in the message
