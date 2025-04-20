@@ -865,23 +865,16 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 language = message.get("language", "en").lower()
                 audio_format = message.get("audioFormat", "opus").lower()
                 save_log = message.get("saveLog", False)
-                words_per_segment = message.get("wordsPerSegment", DEFAULT_WORDS_PER_SEGMENT)
-                
-                # Convert wordsPerSegment to int and validate
-                if isinstance(words_per_segment, str):
-                    try:
-                        words_per_segment = int(words_per_segment)
-                    except ValueError:
-                        words_per_segment = DEFAULT_WORDS_PER_SEGMENT
-                elif not isinstance(words_per_segment, int):
-                    words_per_segment = DEFAULT_WORDS_PER_SEGMENT
-                
-                # Ensure at least 1 word per segment
-                words_per_segment = max(1, words_per_segment)
+                # Added the new saveAudioFile parameter
+                save_audio_file = message.get("saveAudioFile", False)
                 
                 # Convert saveLog to boolean if it's a string
                 if isinstance(save_log, str):
                     save_log = save_log.lower() == "true"
+                
+                # Convert saveAudioFile to boolean if it's a string
+                if isinstance(save_audio_file, str):
+                    save_audio_file = save_audio_file.lower() == "true"
                 
                 # Check if there's a config flag in the message and skip text processing
                 if message.get("config", False):
@@ -895,7 +888,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 error = ERROR_CODES["TTS_GENERATION_ERROR"]
                 await websocket.send_json({
                     "errorCode": error["errorCode"], 
-                    "message": "Invalid JSON format. Expected format: {\"language\": \"en\", \"audioFormat\": \"opus\", \"saveLog\": false, \"text\": \"Your text here\"}"
+                    "message": "Invalid JSON format. Expected format: {\"language\": \"en\", \"audioFormat\": \"opus\", \"saveLog\": false, \"saveAudioFile\": false, \"text\": \"Your text here\"}"
                 })
                 continue
             
@@ -912,7 +905,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
             
-            print(f"Processing text: {text} with language: {language}, format: {audio_format}, words per segment: {words_per_segment}")
+            print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}")
             
             # Validate audio format
             if audio_format not in ["wav", "opus"]:
@@ -1002,14 +995,15 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                         print(f"Time to first chunk: {first_chunk_time:.2f} ms")
                         first_chunk = False
                     
-                    # Save the chunk to a file for combining later
-                    chunk_filename = f"outputs/{timestamp}-{i+1}.{audio_format}"
-                    chunk_files.append(chunk_filename)
-                    
-                    # Start a task to save the chunk in the background using high-quality torchaudio method
-                    asyncio.create_task(
-                        save_audio_chunk_background(chunk, chunk_filename, audio_format)
-                    )
+                    # Only save the chunk to a file if saveAudioFile is True
+                    if save_audio_file:
+                        chunk_filename = f"outputs/{timestamp}-{i+1}.{audio_format}"
+                        chunk_files.append(chunk_filename)
+                        
+                        # Start a task to save the chunk in the background using high-quality torchaudio method
+                        asyncio.create_task(
+                            save_audio_chunk_background(chunk, chunk_filename, audio_format)
+                        )
                     
                     # Stream the chunk to the client with high quality
                     if isinstance(chunk, torch.Tensor):
@@ -1062,41 +1056,46 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                             # Send the opus data
                             await websocket.send_bytes(opus_data)
                     
-                # Full audio file path
-                full_audio_path = f"outputs/{timestamp}-full.{audio_format}"
-                
-                # Start a task to combine all chunk files in the background
-                combine_task = asyncio.create_task(
-                    combine_audio_chunks_background(chunk_files, full_audio_path, audio_format)
-                )
-                
-                # Only save info log if saveLog is true
-                if save_log:
-                    # Create a text file with information about the chunked generation
-                    info_path = f"outputs/info_{timestamp}.txt"
-                    asyncio.create_task(
-                        save_tts_info_background(text, language, words_per_segment, len(chunk_files), info_path, chunk_files, full_audio_path)
+                # Only combine and save audio files if saveAudioFile is True
+                if save_audio_file:
+                    # Full audio file path
+                    full_audio_path = f"outputs/{timestamp}-full.{audio_format}"
+                    
+                    # Start a task to combine all chunk files in the background
+                    combine_task = asyncio.create_task(
+                        combine_audio_chunks_background(chunk_files, full_audio_path, audio_format)
                     )
+                    
+                    # Only save info log if saveLog is true and saveAudioFile is true
+                    if save_log:
+                        # Create a text file with information about the chunked generation
+                        info_path = f"outputs/info_{timestamp}.txt"
+                        asyncio.create_task(
+                            save_tts_info_background(text, language, None, len(chunk_files), info_path, chunk_files, full_audio_path)
+                        )
+                    
+                    # Wait for the combination task to complete before scheduling cleanup
+                    try:
+                        # Wait for combine task with a reasonable timeout
+                        await asyncio.wait_for(combine_task, timeout=30.0)
+                        print(f"Audio combination completed for {full_audio_path}")
+                        
+                        # Schedule WAV cleanup without waiting for it to complete
+                        asyncio.create_task(
+                            async_clean_wav_files(
+                                exclude_patterns=[f"{timestamp}-*.{audio_format}", f"{timestamp}-full.{audio_format}"]
+                            )
+                        )
+                    except asyncio.TimeoutError:
+                        print(f"Warning: Audio combination timed out for {full_audio_path}")
+                    except Exception as e:
+                        print(f"Error waiting for audio combination: {e}")
+                else:
+                    # If we're not saving audio files, still run the cleanup to remove older files
+                    asyncio.create_task(async_clean_wav_files())
                 
                 # Send an empty chunk to signal completion
                 await websocket.send_bytes(b'')
-                
-                # Wait for the combination task to complete before scheduling cleanup
-                try:
-                    # Wait for combine task with a reasonable timeout
-                    await asyncio.wait_for(combine_task, timeout=30.0)
-                    print(f"Audio combination completed for {full_audio_path}")
-                    
-                    # Schedule WAV cleanup without waiting for it to complete
-                    asyncio.create_task(
-                        async_clean_wav_files(
-                            exclude_patterns=[f"{timestamp}-*.{audio_format}", f"{timestamp}-full.{audio_format}"]
-                        )
-                    )
-                except asyncio.TimeoutError:
-                    print(f"Warning: Audio combination timed out for {full_audio_path}")
-                except Exception as e:
-                    print(f"Error waiting for audio combination: {e}")
                 
             except Exception as e:
                 print(f"Error generating audio: {e}")
