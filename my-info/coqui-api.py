@@ -987,6 +987,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 )
                 
                 first_chunk = True
+                first_chunk_time = 0
                 for i, chunk in enumerate(stream_chunks):
                     # Track timing info
                     chunk_time = (time.time() - start_time) * 1000  # Time in milliseconds
@@ -1080,7 +1081,11 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                         await asyncio.wait_for(combine_task, timeout=30.0)
                         print(f"Audio combination completed for {full_audio_path}")
                         
+                        # Print the "Time to first chunk" information again before cleanup
+                        print(f"Time to first chunk: {first_chunk_time:.2f} ms")
+                        
                         # Schedule WAV cleanup without waiting for it to complete
+                        print("Starting cleanup process...")
                         asyncio.create_task(
                             async_clean_wav_files(
                                 exclude_patterns=[f"{timestamp}-*.{audio_format}", f"{timestamp}-full.{audio_format}"]
@@ -1091,7 +1096,11 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                     except Exception as e:
                         print(f"Error waiting for audio combination: {e}")
                 else:
+                    # Print the "Time to first chunk" information again before cleanup
+                    print(f"Time to first chunk: {first_chunk_time:.2f} ms")
+                    
                     # If we're not saving audio files, still run the cleanup to remove older files
+                    print("Starting cleanup process...")
                     asyncio.create_task(async_clean_wav_files())
                 
                 # Send an empty chunk to signal completion
