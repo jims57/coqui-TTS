@@ -97,6 +97,10 @@ app.mount("/static", StaticFiles(directory="."), name="static")
 async def get_webclient():
     return FileResponse("webclient.html")
 
+@app.get("/webclient_raw_stream.html")
+async def get_webclient():
+    return FileResponse("webclient_raw_stream.html")
+
 # Global variable for TTS model
 global_tts = None
 
