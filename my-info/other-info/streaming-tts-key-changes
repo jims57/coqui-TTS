@@ -1,0 +1,18 @@
+Key Changes Explained
+WAV Format Streaming:
+Send a proper WAV header at the beginning before sending any audio data
+Stream continuous PCM data chunks directly without additional headers
+Set a placeholder size in the header large enough to accommodate all the audio
+Opus Format Streaming:
+Use OGG container format for better streaming with Opus codec
+Set up a dedicated FFmpeg process that runs throughout the streaming session
+Feed PCM data to FFmpeg and stream the OGG/Opus output to the client
+Use -flush_packets 1 to ensure data is sent immediately for better streaming
+Smooth Playback Experience:
+For WAV: Mobile clients can parse the initial header and then append all subsequent raw PCM data
+For Opus: The OGG container format is designed for streaming and can be played as a continuous stream in iOS/Android
+These changes ensure that:
+Both formats are supported as requested
+Mobile clients receive properly formatted streaming audio they can play without interruption
+The audio starts playing as soon as the first chunk arrives, while subsequent chunks are added seamlessly
+This implementation should provide a smooth playback experience for iOS and Android clients, allowing them to play the audio as if it were a single continuous file.
