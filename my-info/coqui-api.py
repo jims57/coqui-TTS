@@ -971,6 +971,84 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 
                 print(f"Using improved stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len} for better audio quality")
                 
+                # For WAV format, send header first before streaming chunks
+                if audio_format == "wav":
+                    # Send WAV header with placeholder values
+                    # We'll use 24000 sample rate (XTTS output rate) for proper playback
+                    sample_rate = 24000
+                    bits_per_sample = 16
+                    channels = 1
+                    
+                    # Create a buffer for the WAV header
+                    header_buffer = io.BytesIO()
+                    
+                    # RIFF header
+                    header_buffer.write(b'RIFF')
+                    # Placeholder for file size (we'll use a large value since we don't know final size)
+                    header_buffer.write(struct.pack('<I', 0x7FFFFFFF))
+                    header_buffer.write(b'WAVE')
+                    
+                    # Format chunk
+                    header_buffer.write(b'fmt ')
+                    header_buffer.write(struct.pack('<I', 16))  # subchunk size (16 for PCM)
+                    header_buffer.write(struct.pack('<H', 1))   # PCM format
+                    header_buffer.write(struct.pack('<H', channels))  # channels
+                    header_buffer.write(struct.pack('<I', sample_rate))  # sample rate
+                    header_buffer.write(struct.pack('<I', sample_rate * channels * bits_per_sample // 8))  # byte rate
+                    header_buffer.write(struct.pack('<H', channels * bits_per_sample // 8))  # block align
+                    header_buffer.write(struct.pack('<H', bits_per_sample))  # bits per sample
+                    
+                    # Data chunk header
+                    header_buffer.write(b'data')
+                    # Placeholder for data size (we'll use a large value)
+                    header_buffer.write(struct.pack('<I', 0x7FFFFFFF))
+                    
+                    # Send the header
+                    await websocket.send_bytes(header_buffer.getvalue())
+                    print("Sent WAV header for streaming playback")
+                
+                # For Opus format, initialize the FFmpeg process that will handle stream conversion
+                if audio_format == "opus":
+                    # Create a process that will accept PCM data and output Opus encoded data
+                    opus_process = subprocess.Popen(
+                        [
+                            "ffmpeg",
+                            "-f", "s16le",      # 16-bit PCM input
+                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                            "-ac", "1",         # Mono
+                            "-i", "pipe:0",     # Read from stdin
+                            "-c:a", "libopus",
+                            "-b:a", "32k",
+                            "-application", "voip",
+                            "-vbr", "on",
+                            "-flush_packets", "1",  # Flush packets more frequently
+                            "-f", "ogg",        # Use OGG container for Opus for better streaming
+                            "pipe:1"            # Output to stdout
+                        ],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        bufsize=0  # Unbuffered
+                    )
+                    print("Created FFmpeg process for Opus streaming")
+                    
+                    # Start a separate task to read from the FFmpeg output and send to client
+                    async def send_opus_stream():
+                        try:
+                            # Read from FFmpeg's stdout and send to client
+                            while True:
+                                opus_chunk = await asyncio.get_event_loop().run_in_executor(
+                                    None, lambda: opus_process.stdout.read(512)
+                                )
+                                if not opus_chunk:
+                                    break
+                                await websocket.send_bytes(opus_chunk)
+                        except Exception as e:
+                            print(f"Error in Opus streaming task: {e}")
+                            
+                    # Start the Opus streaming task
+                    opus_stream_task = asyncio.create_task(send_opus_stream())
+                
                 stream_chunks = global_streaming_model.inference_stream(
                     text=text,
                     language=language,
@@ -1009,54 +1087,52 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                     # Stream the chunk to the client with high quality
                     if isinstance(chunk, torch.Tensor):
                         # Prepare tensor for streaming (keep as tensor for high quality)
-                        chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
+                        chunk_audio = chunk.squeeze().cpu()
                         
                         # Stream in the requested format
                         if audio_format == "wav":
-                            # Create in-memory WAV file
-                            wav_buffer = io.BytesIO()
-                            torchaudio.save(wav_buffer, chunk_audio, 24000, format="wav")
-                            wav_buffer.seek(0)
-                            wav_data = wav_buffer.read()
-                            
-                            # Send WAV data
-                            await websocket.send_bytes(wav_data)
-                        else:  # opus
-                            # Use the same approach as in /tts endpoint
-                            # Start FFmpeg process with the same parameters as in /tts
-                            process = subprocess.Popen(
-                                [
-                                    "ffmpeg",
-                                    "-f", "s16le",      # 16-bit PCM input
-                                    "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                    "-ac", "1",         # Mono
-                                    "-i", "pipe:0",     # Read from stdin
-                                    "-c:a", "libopus",
-                                    "-b:a", "32k",
-                                    "-application", "voip",
-                                    "-vbr", "on",
-                                    "-f", "opus",
-                                    "pipe:1"            # Output to stdout
-                                ],
-                                stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE
-                            )
-                            
-                            # Convert the pytorch tensor to PCM data as done in /tts
-                            chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                            # Convert tensor to PCM for WAV streaming (raw audio data without headers)
+                            chunk_pcm = np.clip(chunk_audio.numpy(), -1, 1)
                             chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
                             
-                            # Send the PCM data to ffmpeg and get opus data
-                            opus_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                            # Send raw PCM data (without any headers)
+                            await websocket.send_bytes(chunk_pcm.tobytes())
+                        else:  # opus
+                            # Convert tensor to PCM for Opus streaming
+                            chunk_pcm = np.clip(chunk_audio.numpy(), -1, 1)
+                            chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
                             
-                            if process.returncode != 0:
-                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                continue
-                            
-                            # Send the opus data
-                            await websocket.send_bytes(opus_data)
+                            # Send PCM data to the FFmpeg process for encoding
+                            try:
+                                opus_process.stdin.write(chunk_pcm.tobytes())
+                                opus_process.stdin.flush()
+                            except BrokenPipeError:
+                                print("FFmpeg pipe closed, cannot write more data")
+                                break
+                
+                # Finalize processing
+                if audio_format == "opus":
+                    # Close stdin to signal end of input to FFmpeg
+                    try:
+                        opus_process.stdin.close()
+                    except:
+                        pass
                     
+                    # Wait for the opus streaming task to complete
+                    try:
+                        await asyncio.wait_for(opus_stream_task, timeout=10.0)
+                    except asyncio.TimeoutError:
+                        print("Timeout waiting for opus stream to complete")
+                    
+                    # Close the process
+                    try:
+                        opus_process.terminate()
+                        await asyncio.sleep(0.1)
+                        if opus_process.poll() is None:
+                            opus_process.kill()
+                    except:
+                        pass
+                
                 # Only combine and save audio files if saveAudioFile is True
                 if save_audio_file:
                     # Full audio file path
