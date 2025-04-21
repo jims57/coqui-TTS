@@ -1264,109 +1264,166 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 
                 print(f"Speaker latents computed in {(time.time() - start_time) * 1000:.2f} ms")
                 
+                # Split text by punctuation for better TTS quality
+                # Define punctuation for splitting
+                punctuation_markers = ['.', '!', '?', ';', ',', ':', '。', '！', '？', '；', '，', '：']
+                
+                # Function to split text by punctuation while keeping the punctuation
+                def split_by_punctuation(text):
+                    segments = []
+                    current_segment = ""
+                    
+                    for char in text:
+                        current_segment += char
+                        if char in punctuation_markers:
+                            if current_segment.strip():  # Only add non-empty segments
+                                segments.append(current_segment.strip())
+                            current_segment = ""
+                    
+                    # Add any remaining text
+                    if current_segment.strip():
+                        segments.append(current_segment.strip())
+                    
+                    # If we have no splits (no punctuation in text), use the whole text
+                    if not segments:
+                        segments = [text]
+                    
+                    # Combine very short segments with the next segment
+                    combined_segments = []
+                    current_combined = ""
+                    
+                    for segment in segments:
+                        # If current segment is short (less than 5 chars) or current_combined is empty
+                        if len(segment) < 5 or not current_combined:
+                            current_combined += " " + segment if current_combined else segment
+                        else:
+                            combined_segments.append(current_combined)
+                            current_combined = segment
+                    
+                    # Add the last combined segment if it exists
+                    if current_combined:
+                        combined_segments.append(current_combined)
+                    
+                    return combined_segments
+                
+                # Split the text
+                text_segments = split_by_punctuation(text)
+                print(f"Split text into {len(text_segments)} segments by punctuation")
+                
                 # Start streaming inference
-                print("Starting streaming inference...")
+                print("Starting streaming inference on text segments...")
                 chunk_files = []  # List to track chunk audio files
+                all_chunks = []  # To collect all chunks for combining at the end if saving
                 
                 # Import torchaudio for high-quality audio processing
                 import torchaudio
                 import io
                 
-                # Use the globally loaded XTTS V2 model's streaming capability
-                print(f"Using streaming parameters: temperature=0.1, length_penalty=1.0, repetition_penalty=90.0, top_k=50")
+                # Set up streaming parameters
+                stream_chunk_size = 10  # Larger chunks for better continuity
+                overlap_wav_len = 3072  # Overlap for smoother transitions
                 
-                # Increase these two key parameters for better streaming quality
-                stream_chunk_size = 10  # Larger chunks for better continuity (original was 10)
-                overlap_wav_len = 3072  # Double the overlap for smoother transitions (original was 1024)
-                
-                print(f"Using improved stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len} for better audio quality")
-                
-                stream_chunks = global_streaming_model.inference_stream(
-                    text=text,
-                    language=language,
-                    gpt_cond_latent=gpt_cond_latent,
-                    speaker_embedding=speaker_embedding,
-                    stream_chunk_size=stream_chunk_size,  # Increased for better quality
-                    overlap_wav_len=overlap_wav_len,      # Increased for smoother transitions
-                    temperature=0.1,
-                    length_penalty=1.0,
-                    repetition_penalty=90.0,
-                    top_k=50,
-                    speed=1.0,
-                    enable_text_splitting=True
-                )
+                print(f"Using stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len}")
                 
                 first_chunk = True
                 first_chunk_time = 0
-                for i, chunk in enumerate(stream_chunks):
-                    # Track timing info
-                    chunk_time = (time.time() - start_time) * 1000  # Time in milliseconds
-                    if first_chunk:
-                        first_chunk_time = chunk_time
-                        print(f"Time to first chunk: {first_chunk_time:.2f} ms")
-                        first_chunk = False
+                chunk_counter = 0
+                
+                # Process each text segment
+                for segment_idx, segment in enumerate(text_segments):
+                    print(f"Processing segment {segment_idx+1}/{len(text_segments)}: {segment[:50]}{'...' if len(segment) > 50 else ''}")
                     
-                    # Only save the chunk to a file if saveAudioFile is True
-                    if save_audio_file:
-                        chunk_filename = f"outputs/{timestamp}-{i+1}.{audio_format}"
-                        chunk_files.append(chunk_filename)
-                        
-                        # Start a task to save the chunk in the background using high-quality torchaudio method
-                        asyncio.create_task(
-                            save_audio_chunk_background(chunk, chunk_filename, audio_format)
-                        )
+                    # Process this segment through the streaming model
+                    stream_chunks = global_streaming_model.inference_stream(
+                        text=segment,
+                        language=language,
+                        gpt_cond_latent=gpt_cond_latent,
+                        speaker_embedding=speaker_embedding,
+                        stream_chunk_size=stream_chunk_size,
+                        overlap_wav_len=overlap_wav_len,
+                        temperature=0.1,
+                        length_penalty=1.0,
+                        repetition_penalty=90.0,
+                        top_k=50,
+                        speed=1.0,
+                        enable_text_splitting=True
+                    )
                     
-                    # Stream the chunk to the client with high quality
-                    if isinstance(chunk, torch.Tensor):
-                        # Prepare tensor for streaming (keep as tensor for high quality)
-                        chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
+                    # Stream each chunk to the client
+                    for chunk in stream_chunks:
+                        chunk_counter += 1
                         
-                        # Stream in the requested format
-                        if audio_format == "wav":
-                            # Create in-memory WAV file
-                            wav_buffer = io.BytesIO()
-                            torchaudio.save(wav_buffer, chunk_audio, 24000, format="wav")
-                            wav_buffer.seek(0)
-                            wav_data = wav_buffer.read()
+                        # Track timing info for first chunk
+                        chunk_time = (time.time() - start_time) * 1000  # Time in milliseconds
+                        if first_chunk:
+                            first_chunk_time = chunk_time
+                            print(f"Time to first chunk: {first_chunk_time:.2f} ms")
+                            first_chunk = False
+                        
+                        # Only save the chunk to a file if saveAudioFile is True
+                        if save_audio_file:
+                            chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format}"
+                            chunk_files.append(chunk_filename)
                             
-                            # Send WAV data
-                            await websocket.send_bytes(wav_data)
-                        else:  # opus
-                            # Use the same approach as in /tts endpoint
-                            # Start FFmpeg process with the same parameters as in /tts
-                            process = subprocess.Popen(
-                                [
-                                    "ffmpeg",
-                                    "-f", "s16le",      # 16-bit PCM input
-                                    "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                    "-ac", "1",         # Mono
-                                    "-i", "pipe:0",     # Read from stdin
-                                    "-c:a", "libopus",
-                                    "-b:a", "32k",
-                                    "-application", "voip",
-                                    "-vbr", "on",
-                                    "-f", "opus",
-                                    "pipe:1"            # Output to stdout
-                                ],
-                                stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE
+                            # Start a task to save the chunk in the background
+                            asyncio.create_task(
+                                save_audio_chunk_background(chunk, chunk_filename, audio_format)
                             )
+                        
+                        # Keep track of all chunks for later combining if needed
+                        if save_audio_file:
+                            all_chunks.append(chunk)
+                        
+                        # Stream the chunk to the client with high quality
+                        if isinstance(chunk, torch.Tensor):
+                            # Prepare tensor for streaming
+                            chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
                             
-                            # Convert the pytorch tensor to PCM data as done in /tts
-                            chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
-                            chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
-                            
-                            # Send the PCM data to ffmpeg and get opus data
-                            opus_data, stderr = process.communicate(input=chunk_pcm.tobytes())
-                            
-                            if process.returncode != 0:
-                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                continue
-                            
-                            # Send the opus data
-                            await websocket.send_bytes(opus_data)
-                    
+                            # Stream in the requested format
+                            if audio_format == "wav":
+                                # Create in-memory WAV file
+                                wav_buffer = io.BytesIO()
+                                torchaudio.save(wav_buffer, chunk_audio, 24000, format="wav")
+                                wav_buffer.seek(0)
+                                wav_data = wav_buffer.read()
+                                
+                                # Send WAV data
+                                await websocket.send_bytes(wav_data)
+                            else:  # opus
+                                # Use FFmpeg to encode to opus
+                                process = subprocess.Popen(
+                                    [
+                                        "ffmpeg",
+                                        "-f", "s16le",      # 16-bit PCM input
+                                        "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                        "-ac", "1",         # Mono
+                                        "-i", "pipe:0",     # Read from stdin
+                                        "-c:a", "libopus",
+                                        "-b:a", "32k",
+                                        "-application", "voip",
+                                        "-vbr", "on",
+                                        "-f", "opus",
+                                        "pipe:1"            # Output to stdout
+                                    ],
+                                    stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE
+                                )
+                                
+                                # Convert the pytorch tensor to PCM data
+                                chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                
+                                # Send the PCM data to ffmpeg and get opus data
+                                opus_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                
+                                if process.returncode != 0:
+                                    print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                    continue
+                                
+                                # Send the opus data
+                                await websocket.send_bytes(opus_data)
+                
                 # Only combine and save audio files if saveAudioFile is True
                 if save_audio_file:
                     # Full audio file path
