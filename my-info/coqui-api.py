@@ -2413,7 +2413,6 @@ async def raw_stream_tts_endpoint(websocket: WebSocket, api_key: Optional[str] =
         text = request_data.get("text", "")
         if not text:
             await websocket.send_json({"error": "Text is required"})
-            await websocket.close()
             return
             
         language = request_data.get("language", "en")
@@ -2429,15 +2428,8 @@ async def raw_stream_tts_endpoint(websocket: WebSocket, api_key: Optional[str] =
         stream_chunk_size = int(request_data.get("streamChunkSize", 10))
         overlap_wav_len = int(request_data.get("overlapWavLen", 1024))
         
-        # Get or compute speaker conditioning
-        await websocket.send_json({"status": "Computing speaker latents..."})
-        
-        # Use the global model - assuming it's stored in a variable like 'model' or similar
-        # Based on the streaming-demo.py pattern
+        # Get or compute speaker conditioning 
         gpt_cond_latent, speaker_embedding = global_streaming_model.get_conditioning_latents(audio_path=[reference_audio_path])
-        
-        # Send ready message
-        await websocket.send_json({"status": "Starting inference..."})
         
         # Stream audio chunks directly to client
         chunks = global_streaming_model.inference_stream(
@@ -2468,8 +2460,7 @@ async def raw_stream_tts_endpoint(websocket: WebSocket, api_key: Optional[str] =
             # Log progress (server-side only)
             print(f"Sent chunk {i+1}")
         
-        # Send completion message
-        await websocket.send_json({"status": "complete"})
+        # No completion message and no websocket closing
         
     except WebSocketDisconnect:
         print("Client disconnected from raw-stream-tts endpoint")
@@ -2478,11 +2469,6 @@ async def raw_stream_tts_endpoint(websocket: WebSocket, api_key: Optional[str] =
         print(error_message)
         try:
             await websocket.send_json({"error": error_message})
-        except:
-            pass
-    finally:
-        try:
-            await websocket.close()
         except:
             pass
 
