@@ -1,0 +1,24 @@
+Changes Explained
+Support for PCM Audio Format:
+Added PCM as a supported audio format specifically for iOS clients
+PCM format works better with iOS AudioQueue Services as it can be fed directly to the audio hardware
+Client Type Detection:
+Added a new clientType parameter to identify iOS clients
+This allows special handling for iOS without breaking existing clients
+Sample Rate Specification:
+Added a sampleRate parameter so iOS clients can specify what they need
+Default is 24000 Hz which matches XTTS v2 output
+iOS-Optimized Streaming Parameters:
+Smaller chunk sizes for iOS clients to reduce initial latency
+Still maintains sufficient overlap for seamless playback
+Audio Format Metadata:
+Sends format metadata JSON message for iOS clients
+Helps iOS app configure AudioQueue correctly before receiving audio data
+Chunk Size Header:
+Added a 4-byte header before each PCM chunk
+Contains the byte size of the following chunk
+Allows iOS to properly allocate buffer sizes for each chunk
+Special Termination Signal:
+Sends a zero-size header to signal stream completion
+Helps iOS app know when playback should end
+These changes enable iOS clients to use AudioQueue Services while maintaining backward compatibility with all existing clients and the current API.

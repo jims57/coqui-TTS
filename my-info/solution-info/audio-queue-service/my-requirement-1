@@ -1,0 +1,5 @@
+see @ds-1 @hy-1 , they are answer from other AI, fyi.
+
+a. please update /aqs-tts api to make th api to support Audio Queue Service to ios
+b.don't change the /aqs-tts current logic, unless you think they are neccessary to change so that the Audio Queue Service can work perfectly with ios app(if not necessary, don't change the current logic, cuase the current logic work send stream to client)
+c. i want to the ios can immediately play the audio as the first chuck stream arrives and automatically smoothly play the subsequent chunk seamlessly(without any gap between stream)
