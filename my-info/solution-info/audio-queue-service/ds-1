@@ -1,0 +1,49 @@
+
+
+1. Audio Queue Services (Raw PCM Buffering)
+Why?
+
+Fastest Latency: Directly feeds audio buffers to hardware with minimal delay.
+
+Gapless Playback: Zero gaps between chunks if properly managed.
+
+Best for Real-Time: Ideal for live TTS where chunks arrive unpredictably.
+
+Implementation:
+
+objc
+// 1. Set up Audio Queue (PCM format must match TTS output)
+AudioStreamBasicDescription format;
+format.mFormatID = kAudioFormatLinearPCM;
+format.mSampleRate = 22050; // Match Coqui TTS
+format.mChannelsPerFrame = 1;
+format.mBitsPerChannel = 16;
+format.mFramesPerPacket = 1;
+format.mBytesPerFrame = format.mBitsPerChannel / 8 * format.mChannelsPerFrame;
+format.mBytesPerPacket = format.mBytesPerFrame * format.mFramesPerPacket;
+
+AudioQueueRef queue;
+AudioQueueNewOutput(&format, BufferCallback, (__bridge void*)self, NULL, NULL, 0, &queue);
+
+// 2. Start playback immediately (empty buffers will stall until data arrives)
+AudioQueueStart(queue, NULL);
+
+// 3. Append chunks as they arrive from Coqui TTS
+AudioQueueBufferRef buffer;
+AudioQueueAllocateBuffer(queue, chunkSize, &buffer);
+memcpy(buffer->mAudioData, chunkData, chunkSize);
+buffer->mAudioDataByteSize = chunkSize;
+AudioQueueEnqueueBuffer(queue, buffer, 0, NULL);
+Pros:
+
+⚡ Sub-100ms latency (plays chunks as soon as they arrive).
+
+🎵 Perfectly smooth (no gaps if chunks are contiguous).
+
+💻 No server-side changes (works with raw PCM from Coqui TTS).
+
+Cons:
+
+🔧 Complex: Requires manual buffer management.
+
+🔄 No network recovery: Chunks must arrive in order.

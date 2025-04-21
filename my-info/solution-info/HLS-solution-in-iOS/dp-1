@@ -1,0 +1,24 @@
+HTTP Live Streaming (HLS) with AVPlayer
+Approach:
+Convert incoming audio chunks into an HLS stream (using .m3u8 playlists and .ts/.aac segments) on the server. The iOS AVPlayer natively supports HLS and handles buffering, gapless playback, and adaptive bitrate streaming.
+
+Steps:
+
+Server-Side: Package Coqui TTS audio chunks into HLS segments.
+
+iOS Client: Use AVPlayer to stream the HLS URL.
+
+objc
+NSURL *hlsURL = [NSURL URLWithString:@"https://your-server/stream.m3u8"];
+AVPlayerItem *playerItem = [AVPlayerItem playerItemWithURL:hlsURL];
+AVPlayer *player = [AVPlayer playerWithPlayerItem:playerItem];
+[player play];
+Pros:
+
+Native support, minimal client-side code.
+
+Automatic gap handling and buffering.
+Cons:
+
+Requires HLS server infrastructure.
+

@@ -1,0 +1,16 @@
+​​AudioQueue Services (Low-Level C API)​​
+​​Best for:​​ Real-time buffer management and low latency.
+​​How it works:​​
+
+Use AudioQueue to enqueue audio buffers as they arrive from Coqui TTS.
+Callbacks trigger playback of each buffer while new data is appended.
+​​Implementation steps:​​
+a. Initialize AudioQueue with a callback function to handle buffer readiness.
+b. Convert Coqui TTS output to PCM audio buffers (e.g., via AVAudioConverter).
+c. Enqueue buffers using AudioQueueEnqueueBuffer and manage timing to avoid gaps.
+​​Pros:​​
+Direct control over audio pipeline.
+Suitable for live scenarios with variable chunk sizes.
+​​Cons:​​
+Complex implementation (manual buffer synchronization).
+Requires handling interruptions (e.g., phone calls).
