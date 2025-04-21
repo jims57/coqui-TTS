@@ -2398,6 +2398,104 @@ async def async_clean_wav_files(exclude_patterns=None):
     except Exception as e:
         print(f"Error during cleanup: {e}")
 
+@app.websocket("/raw-stream-tts")
+async def raw_stream_tts_endpoint(websocket: WebSocket, api_key: Optional[str] = Query(None)):
+    """Stream TTS audio directly to client without saving files, optimized for iOS clients.
+    Client can immediately play the first chunk and seamlessly play subsequent chunks without gaps."""
+    
+    await websocket.accept()
+    
+    try:
+        # Receive and parse the request
+        request_data = await websocket.receive_json()
+        
+        # Extract parameters
+        text = request_data.get("text", "")
+        if not text:
+            await websocket.send_json({"error": "Text is required"})
+            await websocket.close()
+            return
+            
+        language = request_data.get("language", "en")
+        reference_audio_path = request_data.get("referenceAudio", "reference_samples/andy-liu-en-1.wav")
+        
+        # Optional parameters with defaults
+        temperature = float(request_data.get("temperature", 0.1))
+        length_penalty = float(request_data.get("lengthPenalty", 1.0))
+        repetition_penalty = float(request_data.get("repetitionPenalty", 90.0))
+        top_k = int(request_data.get("topK", 50))
+        speed = float(request_data.get("speed", 1.0))
+        enable_text_splitting = bool(request_data.get("enableTextSplitting", True))
+        stream_chunk_size = int(request_data.get("streamChunkSize", 10))
+        overlap_wav_len = int(request_data.get("overlapWavLen", 1024))
+        
+        # Get or compute speaker conditioning
+        await websocket.send_json({"status": "Computing speaker latents..."})
+        
+        # Use the global model - assuming it's stored in a variable like 'model' or similar
+        # Based on the streaming-demo.py pattern
+        gpt_cond_latent, speaker_embedding = global_streaming_model.get_conditioning_latents(audio_path=[reference_audio_path])
+        
+        # Send ready message
+        await websocket.send_json({"status": "Starting inference..."})
+        
+        # Stream audio chunks directly to client
+        chunks = global_streaming_model.inference_stream(
+            text,
+            language,
+            gpt_cond_latent,
+            speaker_embedding,
+            stream_chunk_size=stream_chunk_size,
+            overlap_wav_len=overlap_wav_len,
+            temperature=temperature,
+            length_penalty=length_penalty,
+            repetition_penalty=repetition_penalty,
+            top_k=top_k,
+            speed=speed,
+            enable_text_splitting=enable_text_splitting
+        )
+        
+        for i, chunk in enumerate(chunks):
+            # Convert tensor to bytes
+            chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
+            
+            # Convert to opus format bytes
+            opus_bytes = convert_tensor_to_opus_bytes(chunk_audio, sample_rate=24000)
+            
+            # Send the audio chunk directly
+            await websocket.send_bytes(opus_bytes)
+            
+            # Log progress (server-side only)
+            print(f"Sent chunk {i+1}")
+        
+        # Send completion message
+        await websocket.send_json({"status": "complete"})
+        
+    except WebSocketDisconnect:
+        print("Client disconnected from raw-stream-tts endpoint")
+    except Exception as e:
+        error_message = f"Error in raw-stream-tts: {str(e)}"
+        print(error_message)
+        try:
+            await websocket.send_json({"error": error_message})
+        except:
+            pass
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
+
+def convert_tensor_to_opus_bytes(tensor, sample_rate=24000):
+    """Convert audio tensor to opus format bytes for direct streaming"""
+    import io
+    import torchaudio
+    
+    buffer = io.BytesIO()
+    torchaudio.save(buffer, tensor, sample_rate, format="opus")
+    buffer.seek(0)
+    return buffer.read()
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9002)
 

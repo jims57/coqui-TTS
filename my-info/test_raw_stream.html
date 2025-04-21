@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Raw Stream TTS Test</title>
+    <script>
+        let audioContext;
+        let audioQueue = [];
+        let isPlaying = false;
+
+        function connect() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const ws = new WebSocket(serverUrl);
+            const logElement = document.getElementById('log');
+            
+            ws.onopen = function() {
+                logElement.innerHTML += '<p>Connected to server</p>';
+                
+                // Send the request
+                const text = document.getElementById('textInput').value;
+                const requestData = {
+                    text: text,
+                    language: "en",
+                    temperature: 0.1,
+                    lengthPenalty: 1.0,
+                    repetitionPenalty: 90.0,
+                    topK: 50,
+                    speed: 1.0,
+                    enableTextSplitting: true,
+                    streamChunkSize: 10,
+                    overlapWavLen: 1024
+                };
+                
+                ws.send(JSON.stringify(requestData));
+                logElement.innerHTML += '<p>Sent request</p>';
+            };
+            
+            ws.onmessage = async function(event) {
+                if (event.data instanceof Blob) {
+                    logElement.innerHTML += '<p>Received audio chunk</p>';
+                    
+                    // Initialize audio context on first chunk (needed for iOS)
+                    if (!audioContext) {
+                        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    }
+                    
+                    // Process the audio data
+                    const arrayBuffer = await event.data.arrayBuffer();
+                    
+                    // Decode the audio (Opus needs to be decoded differently)
+                    // This is a simplified example - actual opus decoding is more complex
+                    audioContext.decodeAudioData(arrayBuffer, (buffer) => {
+                        audioQueue.push(buffer);
+                        if (!isPlaying) {
+                            playNextInQueue();
+                        }
+                    }, (err) => {
+                        console.error("Error decoding audio", err);
+                    });
+                    
+                } else {
+                    // Handle JSON messages
+                    try {
+                        const jsonData = JSON.parse(event.data);
+                        logElement.innerHTML += `<p>Received message: ${JSON.stringify(jsonData)}</p>`;
+                    } catch (e) {
+                        logElement.innerHTML += `<p>Received text: ${event.data}</p>`;
+                    }
+                }
+            };
+            
+            ws.onclose = function() {
+                logElement.innerHTML += '<p>Connection closed</p>';
+            };
+            
+            ws.onerror = function(error) {
+                logElement.innerHTML += `<p>Error: ${error.message}</p>`;
+            };
+        }
+        
+        function playNextInQueue() {
+            if (audioQueue.length === 0) {
+                isPlaying = false;
+                return;
+            }
+            
+            isPlaying = true;
+            const buffer = audioQueue.shift();
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            
+            source.onended = playNextInQueue;
+            source.start(0);
+        }
+    </script>
+</head>
+<body>
+    <h1>Raw Stream TTS Test</h1>
+    <div>
+        <label for="serverUrl">WebSocket URL:</label>
+        <input type="text" id="serverUrl" value="ws://106.150.252.89:51104/raw-stream-tts" style="width: 400px;">
+    </div>
+    <div>
+        <label for="textInput">Text to synthesize:</label>
+        <textarea id="textInput" rows="4" cols="50">This is a test of the raw streaming TTS API.</textarea>
+    </div>
+    <button onclick="connect()">Connect and Send</button>
+    <div id="log" style="margin-top: 20px; border: 1px solid #ccc; padding: 10px; height: 300px; overflow-y: scroll;"></div>
+</body>
+</html>
