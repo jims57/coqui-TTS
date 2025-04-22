@@ -16,4 +16,7 @@
 | hu | Hungarian | 匈牙利语 |
 | ko | Korean | 韩语 |
 | ja | Japanese | 日语 |
-| hi | Hindi | 印地语 |
+
+
+
+As of now, XTTS-v2 supports 16 languages: English (en), Spanish (es), French (fr), German (de), Italian (it), Portuguese (pt), Polish (pl), Turkish (tr), Russian (ru), Dutch (nl), Czech (cs), Arabic (ar), Chinese (zh-cn), Japanese (ja), Hungarian (hu) and Korean (ko).
