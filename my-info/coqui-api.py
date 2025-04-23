@@ -1404,6 +1404,8 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 save_audio_file = message.get("saveAudioFile", False)
                 # Add parameter for reference audio path - default to standard sample
                 reference_audio = message.get("referenceAudio", sample_wav_path)
+                # Add parameter for speed - default to 1.0
+                speed = message.get("speed", 1.0)
                 
                 # Convert saveLog to boolean if it's a string
                 if isinstance(save_log, str):
@@ -1412,6 +1414,14 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Convert saveAudioFile to boolean if it's a string
                 if isinstance(save_audio_file, str):
                     save_audio_file = save_audio_file.lower() == "true"
+                
+                # Convert speed to float if it's a string
+                if isinstance(speed, str):
+                    try:
+                        speed = float(speed)
+                    except ValueError:
+                        # If conversion fails, use default
+                        speed = 1.0
                 
                 # Check if there's a config flag in the message and skip text processing
                 if message.get("config", False):
@@ -1442,7 +1452,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
             
-            print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}")
+            print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}, speed: {speed}")
             
             # Validate audio format
             if audio_format not in ["wav", "opus"]:
@@ -1574,7 +1584,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 stream_chunk_size = 10  # Larger chunks for better continuity
                 overlap_wav_len = 3072  # Overlap for smoother transitions
                 
-                print(f"Using stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len}")
+                print(f"Using stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len}, speed={speed}")
                 
                 first_chunk = True
                 first_chunk_time = 0
@@ -1596,7 +1606,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                         length_penalty=1.0,
                         repetition_penalty=90.0,
                         top_k=50,
-                        speed=1.0,
+                        speed=speed,
                         enable_text_splitting=True
                     )
                     
@@ -1815,6 +1825,9 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                     
                                     # Send the opus data
                                     await websocket.send_bytes(opus_data)
+                
+                # Print parameter values before cleanup starts
+                print(f"Parameters used - language: {language}, audioFormat: {audio_format}, saveAudioFile: {save_audio_file}, saveLog: {save_log}, speed: {speed}, referenceAudio: {reference_audio}")
                 
                 # Only combine and save audio files if saveAudioFile is True
                 if save_audio_file:
