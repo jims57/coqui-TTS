@@ -2948,7 +2948,7 @@ def convert_tensor_to_opus_bytes(tensor, sample_rate=24000):
     buffer.seek(0)
     return buffer.read()
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {
         "errorCode": 0,  # 0 typically indicates success
