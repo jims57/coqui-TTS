@@ -115,6 +115,18 @@ global_streaming_config = None
 # Add these global variables at the top of the file, near other global variables
 global_cached_latents = {}
 
+# Add this near the top of the file with other global variables
+SPEAKER_IDS = {
+    1: "reference_samples/andy-liu-en-1.wav",
+    2: "reference_samples/jack-mark-en-1.wav",
+    3: "reference_samples/leijun.wav",
+    4: "reference_samples/speaker2.mp3",
+    # Default to andy-liu-en-1.wav for any other value
+}
+
+# Default speaker reference audio to use if speakerId is invalid or not provided
+DEFAULT_SPEAKER_AUDIO = "reference_samples/andy-liu-en-1.wav"
+
 def initialize_tts():
     global global_tts, global_chinese_tts
     try:
@@ -1402,10 +1414,18 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 save_log = message.get("saveLog", False)
                 # Added the new saveAudioFile parameter
                 save_audio_file = message.get("saveAudioFile", False)
-                # Add parameter for reference audio path - default to standard sample
-                reference_audio = message.get("referenceAudio", sample_wav_path)
+                # Get speakerId parameter
+                speaker_id = message.get("speakerId", None)
                 # Add parameter for speed - default to 1.0
                 speed = message.get("speed", 1.0)
+                
+                # Determine reference audio based on speakerId
+                if speaker_id is not None:
+                    # Try to get the reference audio from the dictionary
+                    reference_audio = SPEAKER_IDS.get(speaker_id, DEFAULT_SPEAKER_AUDIO)
+                else:
+                    # Use default speaker if speakerId not provided
+                    reference_audio = DEFAULT_SPEAKER_AUDIO
                 
                 # Convert saveLog to boolean if it's a string
                 if isinstance(save_log, str):
@@ -1435,7 +1455,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 error = ERROR_CODES["TTS_GENERATION_ERROR"]
                 await websocket.send_json({
                     "errorCode": error["errorCode"], 
-                    "message": "Invalid JSON format. Expected format: {\"language\": \"en\", \"audioFormat\": \"opus\", \"saveLog\": false, \"saveAudioFile\": false, \"text\": \"Your text here\"}"
+                    "message": "Invalid JSON format. Expected format: {\"language\": \"en\", \"audioFormat\": \"opus\", \"saveLog\": false, \"saveAudioFile\": false, \"speakerId\": 1, \"text\": \"Your text here\"}"
                 })
                 continue
             
@@ -1452,7 +1472,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
             
-            print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}, speed: {speed}")
+            print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}, speed: {speed}, speakerId: {speaker_id}, reference_audio: {reference_audio}")
             
             # Validate audio format
             if audio_format not in ["wav", "opus"]:
@@ -1827,7 +1847,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                     await websocket.send_bytes(opus_data)
                 
                 # Print parameter values before cleanup starts
-                print(f"Parameters used - language: {language}, audioFormat: {audio_format}, saveAudioFile: {save_audio_file}, saveLog: {save_log}, speed: {speed}, referenceAudio: {reference_audio}")
+                print(f"Parameters used - language: {language}, audioFormat: {audio_format}, saveAudioFile: {save_audio_file}, saveLog: {save_log}, speed: {speed}, speakerId: {speaker_id}, reference_audio: {reference_audio}")
                 
                 # Only combine and save audio files if saveAudioFile is True
                 if save_audio_file:
