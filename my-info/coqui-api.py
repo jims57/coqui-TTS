@@ -2948,6 +2948,13 @@ def convert_tensor_to_opus_bytes(tensor, sample_rate=24000):
     buffer.seek(0)
     return buffer.read()
 
+@app.get("/")
+async def root():
+    return {
+        "errorCode": 0,  # 0 typically indicates success
+        "message": "Server is running"
+    }
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=9002)
 
