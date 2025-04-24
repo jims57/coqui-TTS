@@ -1516,7 +1516,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 
                 # Split text by punctuation for better TTS quality
                 # Define punctuation for splitting
-                punctuation_markers = ['.', '!', '?', ';', ',', ':', '。', '！', '？', '；', '，', '：']
+                punctuation_markers = ['.', '!', '?', ';', ',', ':', '。', '！', '、', '？', '；', '，', '：']
                 
                 # Function to split text by punctuation while keeping the punctuation
                 def split_by_punctuation(text):
