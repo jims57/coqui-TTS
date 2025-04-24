@@ -1410,6 +1410,10 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Extract required parameters from the JSON
                 text = message.get("text", "")
                 language = message.get("language", "en").lower()
+                # Handle "zh" language code - convert it to "zh-cn"
+                if language == "zh":
+                    language = "zh-cn"
+                    print("Converted language code 'zh' to 'zh-cn'")
                 audio_format = message.get("audioFormat", "opus").lower()
                 save_log = message.get("saveLog", False)
                 # Added the new saveAudioFile parameter
