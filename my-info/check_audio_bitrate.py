@@ -58,6 +58,20 @@ def check_audio_bitrate(audio_path):
                         print(f"Error using ffprobe: {e}")
                         bitrate = "Unknown"
                 
+                # If TinyTag couldn't determine the duration, use ffprobe as fallback
+                if tag.duration is None:
+                    try:
+                        # Use ffprobe to get duration information
+                        duration_cmd = ['ffprobe', '-v', 'error', '-show_entries', 
+                                       'format=duration', '-of', 
+                                       'default=noprint_wrappers=1:nokey=1', audio_file_path]
+                        
+                        duration_result = subprocess.run(duration_cmd, capture_output=True, text=True)
+                        if duration_result.stdout.strip():
+                            tag.duration = float(duration_result.stdout.strip())
+                    except Exception as e:
+                        print(f"Error getting duration with ffprobe: {e}")
+                
                 # Determine format from extension
                 format_name = file_ext.strip('.').upper()
                 
