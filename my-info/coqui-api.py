@@ -228,7 +228,7 @@ ERROR_CODES = {
     "RATE_LIMIT_EXCEEDED": {"errorCode": 5001, "message": "Rate limit exceeded"},
     "UNSUPPORTED_LANGUAGE": {"errorCode": 6001, "message": "Unsupported language"},
     "LANGUAGE_MISMATCH": {"errorCode": 6002, "message": "Text language doesn't match requested language"},
-    "INVALID_AUDIO_FORMAT": {"errorCode": 6003, "message": "Invalid audio format. Supported formats: wav, opus"}
+    "INVALID_AUDIO_FORMAT": {"errorCode": 6003, "message": "Invalid audio format. Supported formats: wav, opus, aac"}
 }
 
 # Load supported languages
@@ -927,7 +927,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
             print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}")
             
             # Validate audio format
-            if audio_format not in ["wav", "opus"]:
+            if audio_format not in ["wav", "opus", "aac"]:
                 error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
                 await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
                 continue
@@ -1102,7 +1102,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                 
                                 # Start a task to save the chunk in the background
                                 asyncio.create_task(
-                                    save_audio_chunk_background(first_audio_chunk, chunk_filename, audio_format)
+                                    save_audio_chunk_background(first_audio_chunk, chunk_filename, audio_format, aac_bitrate="96k" if audio_format == "aac" else None)
                                 )
                             
                             # Keep track of all chunks for later combining if needed
@@ -1124,6 +1124,37 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                     
                                     # Send WAV data - first response goes out immediately
                                     await websocket.send_bytes(wav_data)
+                                elif audio_format == "aac":
+                                    # Use FFmpeg to encode to AAC
+                                    process = subprocess.Popen(
+                                        [
+                                            "ffmpeg",
+                                            "-f", "s16le",      # 16-bit PCM input
+                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                            "-ac", "1",         # Mono
+                                            "-i", "pipe:0",     # Read from stdin
+                                            "-c:a", "aac",
+                                            "-b:a", "96k",
+                                            "-f", "adts",       # AAC transport stream format
+                                            "pipe:1"            # Output to stdout
+                                        ],
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    
+                                    # Convert the pytorch tensor to PCM data
+                                    chunk_pcm = np.clip(first_audio_chunk.squeeze().cpu().numpy(), -1, 1)
+                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                    
+                                    # Send the PCM data to ffmpeg and get aac data
+                                    aac_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                    
+                                    if process.returncode != 0:
+                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                    else:
+                                        # Send the aac data - first response goes out immediately
+                                        await websocket.send_bytes(aac_data)
                                 else:  # opus
                                     # Use FFmpeg to encode to opus
                                     process = subprocess.Popen(
@@ -1169,7 +1200,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                     
                                     # Start a task to save the chunk in the background
                                     asyncio.create_task(
-                                        save_audio_chunk_background(chunk, chunk_filename, audio_format)
+                                        save_audio_chunk_background(chunk, chunk_filename, audio_format, aac_bitrate="96k" if audio_format == "aac" else None)
                                     )
                                 
                                 # Keep track of all chunks for later combining if needed
@@ -1191,6 +1222,37 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                         
                                         # Send WAV data
                                         await websocket.send_bytes(wav_data)
+                                    elif audio_format == "aac":
+                                        # Use FFmpeg to encode to AAC
+                                        process = subprocess.Popen(
+                                            [
+                                                "ffmpeg",
+                                                "-f", "s16le",      # 16-bit PCM input
+                                                "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                                "-ac", "1",         # Mono
+                                                "-i", "pipe:0",     # Read from stdin
+                                                "-c:a", "aac",
+                                                "-b:a", "96k",
+                                                "-f", "adts",       # AAC transport stream format
+                                                "pipe:1"            # Output to stdout
+                                            ],
+                                            stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE
+                                        )
+                                        
+                                        # Convert the pytorch tensor to PCM data
+                                        chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                        chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                        
+                                        # Send the PCM data to ffmpeg and get aac data
+                                        aac_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                        
+                                        if process.returncode != 0:
+                                            print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                        else:
+                                            # Send the aac data - first response goes out immediately
+                                            await websocket.send_bytes(aac_data)
                                     else:  # opus
                                         # Use FFmpeg to encode to opus
                                         process = subprocess.Popen(
@@ -1241,7 +1303,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                 
                                 # Start a task to save the chunk in the background
                                 asyncio.create_task(
-                                    save_audio_chunk_background(chunk, chunk_filename, audio_format)
+                                    save_audio_chunk_background(chunk, chunk_filename, audio_format, aac_bitrate="96k" if audio_format == "aac" else None)
                                 )
                             
                             # Keep track of all chunks for later combining if needed
@@ -1263,6 +1325,37 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                     
                                     # Send WAV data
                                     await websocket.send_bytes(wav_data)
+                                elif audio_format == "aac":
+                                    # Use FFmpeg to encode to AAC
+                                    process = subprocess.Popen(
+                                        [
+                                            "ffmpeg",
+                                            "-f", "s16le",      # 16-bit PCM input
+                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                            "-ac", "1",         # Mono
+                                            "-i", "pipe:0",     # Read from stdin
+                                            "-c:a", "aac",
+                                            "-b:a", "96k",
+                                            "-f", "adts",       # AAC transport stream format
+                                            "pipe:1"            # Output to stdout
+                                        ],
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    
+                                    # Convert the pytorch tensor to PCM data
+                                    chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                    
+                                    # Send the PCM data to ffmpeg and get aac data
+                                    aac_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                    
+                                    if process.returncode != 0:
+                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                    else:
+                                        # Send the aac data - first response goes out immediately
+                                        await websocket.send_bytes(aac_data)
                                 else:  # opus
                                     # Use FFmpeg to encode to opus
                                     process = subprocess.Popen(
@@ -1305,7 +1398,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                     
                     # Start a task to combine all chunk files in the background
                     combine_task = asyncio.create_task(
-                        combine_audio_chunks_background(chunk_files, full_audio_path, audio_format)
+                        combine_audio_chunks_background(chunk_files, full_audio_path, audio_format, aac_bitrate="96k" if audio_format == "aac" else None)
                     )
                     
                     # Only save info log if saveLog is true and saveAudioFile is true
@@ -1422,6 +1515,19 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 speaker_id = message.get("speakerId", None)
                 # Add parameter for speed - default to 1.0
                 speed = message.get("speed", 1.0)
+                # Get client type for AAC bitrate selection
+                client_type = message.get("clientType", "").lower()
+                
+                # Set AAC bitrate based on client type
+                aac_bitrate = "96k"  # Default bitrate
+                if audio_format == "aac":
+                    if client_type == "ios":
+                        aac_bitrate = "128k"  # iOS: AAC@96-128 kbps (using upper range)
+                    elif client_type == "android":
+                        aac_bitrate = "96k"   # Android: AAC@96 kbps
+                    elif client_type == "java":
+                        aac_bitrate = "64k"   # Java: lower bitrate
+                    print(f"Using AAC bitrate {aac_bitrate} for {client_type} client")
                 
                 # Determine reference audio based on speakerId
                 if speaker_id is not None:
@@ -1479,7 +1585,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
             print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}, speed: {speed}, speakerId: {speaker_id}, reference_audio: {reference_audio}")
             
             # Validate audio format
-            if audio_format not in ["wav", "opus"]:
+            if audio_format not in ["wav", "opus", "aac"]:
                 error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
                 await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
                 continue
@@ -1654,7 +1760,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                 
                                 # Start a task to save the chunk in the background
                                 asyncio.create_task(
-                                    save_audio_chunk_background(first_audio_chunk, chunk_filename, audio_format)
+                                    save_audio_chunk_background(first_audio_chunk, chunk_filename, audio_format, aac_bitrate=aac_bitrate if audio_format == "aac" else None)
                                 )
                             
                             # Keep track of all chunks for later combining if needed
@@ -1676,6 +1782,37 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                     
                                     # Send WAV data - first response goes out immediately
                                     await websocket.send_bytes(wav_data)
+                                elif audio_format == "aac":
+                                    # Use FFmpeg to encode to AAC
+                                    process = subprocess.Popen(
+                                        [
+                                            "ffmpeg",
+                                            "-f", "s16le",      # 16-bit PCM input
+                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                            "-ac", "1",         # Mono
+                                            "-i", "pipe:0",     # Read from stdin
+                                            "-c:a", "aac",
+                                            "-b:a", aac_bitrate,
+                                            "-f", "adts",       # AAC transport stream format
+                                            "pipe:1"            # Output to stdout
+                                        ],
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    
+                                    # Convert the pytorch tensor to PCM data
+                                    chunk_pcm = np.clip(first_audio_chunk.squeeze().cpu().numpy(), -1, 1)
+                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                    
+                                    # Send the PCM data to ffmpeg and get aac data
+                                    aac_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                    
+                                    if process.returncode != 0:
+                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                    else:
+                                        # Send the aac data - first response goes out immediately
+                                        await websocket.send_bytes(aac_data)
                                 else:  # opus
                                     # Use FFmpeg to encode to opus
                                     process = subprocess.Popen(
@@ -1706,9 +1843,10 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                     
                                     if process.returncode != 0:
                                         print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                    else:
-                                        # Send the opus data - first response goes out immediately
-                                        await websocket.send_bytes(opus_data)
+                                        continue
+                                    
+                                    # Send the opus data
+                                    await websocket.send_bytes(opus_data)
                             
                             # Now process remaining chunks for first segment
                             for chunk in stream_chunks_iterator:
@@ -1721,7 +1859,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                     
                                     # Start a task to save the chunk in the background
                                     asyncio.create_task(
-                                        save_audio_chunk_background(chunk, chunk_filename, audio_format)
+                                        save_audio_chunk_background(chunk, chunk_filename, audio_format, aac_bitrate="96k" if audio_format == "aac" else None)
                                     )
                                 
                                 # Keep track of all chunks for later combining if needed
@@ -1743,6 +1881,37 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                         
                                         # Send WAV data
                                         await websocket.send_bytes(wav_data)
+                                    elif audio_format == "aac":
+                                        # Use FFmpeg to encode to AAC
+                                        process = subprocess.Popen(
+                                            [
+                                                "ffmpeg",
+                                                "-f", "s16le",      # 16-bit PCM input
+                                                "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                                "-ac", "1",         # Mono
+                                                "-i", "pipe:0",     # Read from stdin
+                                                "-c:a", "aac",
+                                                "-b:a", "96k",
+                                                "-f", "adts",       # AAC transport stream format
+                                                "pipe:1"            # Output to stdout
+                                            ],
+                                            stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE
+                                        )
+                                        
+                                        # Convert the pytorch tensor to PCM data
+                                        chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                        chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                        
+                                        # Send the PCM data to ffmpeg and get aac data
+                                        aac_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                        
+                                        if process.returncode != 0:
+                                            print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                        else:
+                                            # Send the aac data - first response goes out immediately
+                                            await websocket.send_bytes(aac_data)
                                     else:  # opus
                                         # Use FFmpeg to encode to opus
                                         process = subprocess.Popen(
@@ -1793,7 +1962,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                 
                                 # Start a task to save the chunk in the background
                                 asyncio.create_task(
-                                    save_audio_chunk_background(chunk, chunk_filename, audio_format)
+                                    save_audio_chunk_background(chunk, chunk_filename, audio_format, aac_bitrate="96k" if audio_format == "aac" else None)
                                 )
                             
                             # Keep track of all chunks for later combining if needed
@@ -1815,6 +1984,37 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                     
                                     # Send WAV data
                                     await websocket.send_bytes(wav_data)
+                                elif audio_format == "aac":
+                                    # Use FFmpeg to encode to AAC
+                                    process = subprocess.Popen(
+                                        [
+                                            "ffmpeg",
+                                            "-f", "s16le",      # 16-bit PCM input
+                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                            "-ac", "1",         # Mono
+                                            "-i", "pipe:0",     # Read from stdin
+                                            "-c:a", "aac",
+                                            "-b:a", "96k",
+                                            "-f", "adts",       # AAC transport stream format
+                                            "pipe:1"            # Output to stdout
+                                        ],
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    
+                                    # Convert the pytorch tensor to PCM data
+                                    chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                    
+                                    # Send the PCM data to ffmpeg and get aac data
+                                    aac_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                    
+                                    if process.returncode != 0:
+                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                    else:
+                                        # Send the aac data - first response goes out immediately
+                                        await websocket.send_bytes(aac_data)
                                 else:  # opus
                                     # Use FFmpeg to encode to opus
                                     process = subprocess.Popen(
@@ -1860,7 +2060,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     
                     # Start a task to combine all chunk files in the background
                     combine_task = asyncio.create_task(
-                        combine_audio_chunks_background(chunk_files, full_audio_path, audio_format)
+                        combine_audio_chunks_background(chunk_files, full_audio_path, audio_format, aac_bitrate=aac_bitrate if audio_format == "aac" else None)
                     )
                     
                     # Only save info log if saveLog is true and saveAudioFile is true
@@ -1918,7 +2118,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
             pass
 
 # Helper function to save audio chunk from pytorch tensor
-async def save_audio_chunk_background(chunk, chunk_path, audio_format):
+async def save_audio_chunk_background(chunk, chunk_path, audio_format, aac_bitrate=None):
     try:
         print(f"Saving audio chunk to {chunk_path}")
         
@@ -1934,6 +2134,33 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
                 chunk_audio = (chunk_audio * 32767).astype(np.int16)
                 wavfile.write(chunk_path, 24000, chunk_audio)
                 print(f"Saved WAV audio chunk")
+            elif audio_format == "aac":
+                # Normalize and convert to 16-bit PCM
+                chunk_audio = np.clip(chunk_audio, -1, 1)
+                chunk_audio = (chunk_audio * 32767).astype(np.int16)
+                
+                # Save as WAV first
+                temp_wav_path = chunk_path.replace(".aac", ".temp.wav")
+                wavfile.write(temp_wav_path, 24000, chunk_audio)
+                
+                # Convert to AAC using FFmpeg
+                bitrate = aac_bitrate if aac_bitrate else "96k"
+                subprocess.run([
+                    "ffmpeg",
+                    "-i", temp_wav_path,
+                    "-c:a", "aac",
+                    "-b:a", bitrate,
+                    chunk_path,
+                    "-y"  # Overwrite if exists
+                ], check=False, capture_output=True)
+                
+                # Remove temporary WAV file
+                try:
+                    os.remove(temp_wav_path)
+                except:
+                    pass
+                    
+                print(f"Saved AAC audio chunk with bitrate {bitrate}")
             else:  # opus
                 # Use the same FFmpeg approach as in /tts endpoint
                 # Normalize and convert to 16-bit PCM
@@ -1969,7 +2196,7 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
         print(f"Error saving audio chunk: {e}")
 
 # Helper function to combine audio chunks
-async def combine_audio_chunks_background(chunk_files, full_audio_path, audio_format):
+async def combine_audio_chunks_background(chunk_files, full_audio_path, audio_format, aac_bitrate=None):
     try:
         print(f"Combining {len(chunk_files)} chunks into {full_audio_path}")
         
@@ -2017,6 +2244,32 @@ async def combine_audio_chunks_background(chunk_files, full_audio_path, audio_fo
                 torchaudio.save(full_audio_path, combined, sample_rate)
                 print(f"Saved combined WAV to {full_audio_path}")
             
+        elif audio_format == "aac":
+            # For AAC, use ffmpeg to concatenate
+            concat_file = f"{full_audio_path}.txt"
+            with open(concat_file, 'w') as f:
+                for chunk_file in valid_chunk_files:
+                    f.write(f"file '{os.path.abspath(chunk_file)}'\n")
+            
+            # Use ffmpeg to concatenate files
+            subprocess.run([
+                "ffmpeg",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_file,
+                "-c", "copy",
+                full_audio_path,
+                "-y"
+            ], check=False, capture_output=True)
+            
+            # Remove concat file
+            try:
+                os.remove(concat_file)
+            except:
+                pass
+            
+            print(f"Saved combined AAC to {full_audio_path}")
+        
         else:  # opus
             # For opus, use ffmpeg to concatenate
             concat_file = f"{full_audio_path}.txt"
