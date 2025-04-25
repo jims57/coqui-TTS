@@ -190,10 +190,27 @@ public class Main {
         
         private void extractWavFormat(byte[] wavHeader) {
             try {
+                // Print the raw byte values for channels (bytes 22-23)
+                System.out.println("Raw channel bytes: wavHeader[22]=" + (wavHeader[22] & 0xFF) + 
+                                  ", wavHeader[23]=" + (wavHeader[23] & 0xFF));
+
                 // 从 WAV 头中提取基本格式信息
+                // Extract number of audio channels from bytes 22-23
+                // WAV format stores this as a 16-bit value in little-endian order
+                // We mask each byte with 0xFF to ensure we only get the unsigned byte value
+                // Then combine them with bitwise OR after shifting the second byte
                 int channels = (wavHeader[22] & 0xFF) | ((wavHeader[23] & 0xFF) << 8);
+                
+                // Extract sample rate from bytes 24-27
+                // WAV format stores this as a 32-bit value in little-endian order
+                // We read 4 bytes, masking each with 0xFF, then shift and combine with bitwise OR
+                // Byte 24 is least significant, byte 27 is most significant
                 int sampleRate = (wavHeader[24] & 0xFF) | ((wavHeader[25] & 0xFF) << 8) | 
                                ((wavHeader[26] & 0xFF) << 16) | ((wavHeader[27] & 0xFF) << 24);
+                
+                // Extract bits per sample from bytes 34-35
+                // WAV format stores this as a 16-bit value in little-endian order
+                // Common values are 8, 16, 24, or 32 bits per sample
                 int bitsPerSample = (wavHeader[34] & 0xFF) | ((wavHeader[35] & 0xFF) << 8);
                 
                 System.out.println("WAV format: " + sampleRate + " Hz, " + bitsPerSample + 
