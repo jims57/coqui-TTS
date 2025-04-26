@@ -863,6 +863,9 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                 # Send an empty chunk to signal completion
                 await websocket.send_bytes(b'')
                 
+                # Send "EOT" text message to signal end of transmission
+                await websocket.send_text("EOT")
+                
                 # Wait for the combination task to complete before scheduling cleanup
                 # This ensures all segments are combined before any cleanup happens
                 try:
@@ -1503,6 +1506,9 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 
                 # Send an empty chunk to signal completion
                 await websocket.send_bytes(b'')
+                
+                # Send "EOT" text message to signal end of transmission
+                await websocket.send_text("EOT")
                 
             except Exception as e:
                 print(f"Error generating audio: {e}")
@@ -2153,6 +2159,9 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 
                 # Send an empty chunk to signal completion
                 await websocket.send_bytes(b'')
+                
+                # Send "EOT" text message to signal end of transmission
+                await websocket.send_text("EOT")
                 
             except Exception as e:
                 print(f"Error generating audio: {e}")
