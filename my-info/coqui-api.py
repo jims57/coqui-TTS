@@ -228,7 +228,7 @@ ERROR_CODES = {
     "RATE_LIMIT_EXCEEDED": {"errorCode": 5001, "message": "Rate limit exceeded"},
     "UNSUPPORTED_LANGUAGE": {"errorCode": 6001, "message": "Unsupported language"},
     "LANGUAGE_MISMATCH": {"errorCode": 6002, "message": "Text language doesn't match requested language"},
-    "INVALID_AUDIO_FORMAT": {"errorCode": 6003, "message": "Invalid audio format. Supported formats: wav, opus"}
+    "INVALID_AUDIO_FORMAT": {"errorCode": 6003, "message": "Invalid audio format. Supported formats: wav, opus, mp3"}
 }
 
 # Load supported languages
@@ -447,7 +447,7 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
         print(f"API key extracted: {api_key}")
         
         # Validate audio format
-        if audio_format not in ["wav", "opus"]:
+        if audio_format not in ["wav", "opus", "mp3"]:
             error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
             await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
             await websocket.close(1008)
@@ -525,7 +525,7 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                         save_log = message_save_log.lower() == "true"
                 
                 # Validate audio format again in case it was changed in the message
-                if audio_format not in ["wav", "opus"]:
+                if audio_format not in ["wav", "opus", "mp3"]:
                     error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
                     await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
                     continue
@@ -730,6 +730,37 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                             for j in range(0, len(opus_data), opus_chunk_size):
                                 opus_chunk = opus_data[j:min(j + opus_chunk_size, len(opus_data))]
                                 await websocket.send_bytes(opus_chunk)
+                        elif audio_format == "mp3":
+                            # Create in-memory MP3 file using FFmpeg
+                            process = subprocess.Popen(
+                                [
+                                    "ffmpeg",
+                                    "-f", "s16le",      # 16-bit PCM input
+                                    "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                    "-ac", "1",         # Mono
+                                    "-i", "pipe:0",     # Read from stdin
+                                    "-c:a", "libmp3lame",
+                                    "-b:a", "128k",     # MP3 bitrate
+                                    "-f", "mp3",
+                                    "pipe:1"            # Output to stdout
+                                ],
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            
+                            # Convert the pytorch tensor to PCM data
+                            chunk_pcm = np.clip(first_audio_chunk.squeeze().cpu().numpy(), -1, 1)
+                            chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                            
+                            # Send the PCM data to ffmpeg and get mp3 data
+                            mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                            
+                            if process.returncode != 0:
+                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                            else:
+                                # Send the mp3 data - first response goes out immediately
+                                await websocket.send_bytes(mp3_data)
                     else:
                         # For subsequent segments, stream immediately after generating
                         chunk_size = 1024
@@ -779,6 +810,38 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                             for j in range(0, len(opus_data), opus_chunk_size):
                                 opus_chunk = opus_data[j:min(j + opus_chunk_size, len(opus_data))]
                                 await websocket.send_bytes(opus_chunk)
+                        elif audio_format == "mp3":
+                            # Create a subprocess for FFmpeg
+                            process = subprocess.Popen(
+                                [
+                                    "ffmpeg",
+                                    "-f", "s16le",      # 16-bit PCM input
+                                    "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                    "-ac", "1",         # Mono
+                                    "-i", "pipe:0",     # Read from stdin
+                                    "-c:a", "libmp3lame",
+                                    "-b:a", "128k",     # MP3 bitrate
+                                    "-f", "mp3",
+                                    "pipe:1"            # Output to stdout
+                                ],
+                                stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE
+                            )
+                            
+                            # Convert the pytorch tensor to PCM data
+                            chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                            chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                            
+                            # Send the PCM data to ffmpeg and get mp3 data
+                            mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                            
+                            if process.returncode != 0:
+                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                continue
+                            
+                            # Send the mp3 data
+                            await websocket.send_bytes(mp3_data)
                 
                 # Full audio file path
                 full_audio_path = f"outputs/{timestamp}-full.{audio_format}"
@@ -927,7 +990,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
             print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}")
             
             # Validate audio format
-            if audio_format not in ["wav", "opus"]:
+            if audio_format not in ["wav", "opus", "mp3"]:
                 error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
                 await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
                 continue
@@ -1124,6 +1187,37 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                     
                                     # Send WAV data - first response goes out immediately
                                     await websocket.send_bytes(wav_data)
+                                elif audio_format == "mp3":
+                                    # Create in-memory MP3 file using FFmpeg
+                                    process = subprocess.Popen(
+                                        [
+                                            "ffmpeg",
+                                            "-f", "s16le",      # 16-bit PCM input
+                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                            "-ac", "1",         # Mono
+                                            "-i", "pipe:0",     # Read from stdin
+                                            "-c:a", "libmp3lame",
+                                            "-b:a", "128k",     # MP3 bitrate
+                                            "-f", "mp3",
+                                            "pipe:1"            # Output to stdout
+                                        ],
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    
+                                    # Convert the pytorch tensor to PCM data
+                                    chunk_pcm = np.clip(first_audio_chunk.squeeze().cpu().numpy(), -1, 1)
+                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                    
+                                    # Send the PCM data to ffmpeg and get mp3 data
+                                    mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                    
+                                    if process.returncode != 0:
+                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                    else:
+                                        # Send the mp3 data - first response goes out immediately
+                                        await websocket.send_bytes(mp3_data)
                                 else:  # opus
                                     # Use FFmpeg to encode to opus
                                     process = subprocess.Popen(
@@ -1191,6 +1285,37 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                         
                                         # Send WAV data
                                         await websocket.send_bytes(wav_data)
+                                    elif audio_format == "mp3":
+                                        # Create in-memory MP3 file using FFmpeg
+                                        process = subprocess.Popen(
+                                            [
+                                                "ffmpeg",
+                                                "-f", "s16le",      # 16-bit PCM input
+                                                "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                                "-ac", "1",         # Mono
+                                                "-i", "pipe:0",     # Read from stdin
+                                                "-c:a", "libmp3lame",
+                                                "-b:a", "128k",     # MP3 bitrate
+                                                "-f", "mp3",
+                                                "pipe:1"            # Output to stdout
+                                            ],
+                                            stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE
+                                        )
+                                        
+                                        # Convert the pytorch tensor to PCM data
+                                        chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                        chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                        
+                                        # Send the PCM data to ffmpeg and get mp3 data
+                                        mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                        
+                                        if process.returncode != 0:
+                                            print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                        else:
+                                            # Send the mp3 data - first response goes out immediately
+                                            await websocket.send_bytes(mp3_data)
                                     else:  # opus
                                         # Use FFmpeg to encode to opus
                                         process = subprocess.Popen(
@@ -1263,6 +1388,38 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                     
                                     # Send WAV data
                                     await websocket.send_bytes(wav_data)
+                                elif audio_format == "mp3":
+                                    # Create in-memory MP3 file using FFmpeg
+                                    process = subprocess.Popen(
+                                        [
+                                            "ffmpeg",
+                                            "-f", "s16le",      # 16-bit PCM input
+                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                            "-ac", "1",         # Mono
+                                            "-i", "pipe:0",     # Read from stdin
+                                            "-c:a", "libmp3lame",
+                                            "-b:a", "128k",     # MP3 bitrate
+                                            "-f", "mp3",
+                                            "pipe:1"            # Output to stdout
+                                        ],
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    
+                                    # Convert the pytorch tensor to PCM data
+                                    chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                    
+                                    # Send the PCM data to ffmpeg and get mp3 data
+                                    mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                    
+                                    if process.returncode != 0:
+                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                        continue
+                                    
+                                    # Send the mp3 data
+                                    await websocket.send_bytes(mp3_data)
                                 else:  # opus
                                     # Use FFmpeg to encode to opus
                                     process = subprocess.Popen(
@@ -1479,7 +1636,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
             print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}, speed: {speed}, speakerId: {speaker_id}, reference_audio: {reference_audio}")
             
             # Validate audio format
-            if audio_format not in ["wav", "opus"]:
+            if audio_format not in ["wav", "opus", "mp3"]:
                 error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
                 await websocket.send_json({"errorCode": error["errorCode"], "message": error["message"]})
                 continue
@@ -1676,6 +1833,37 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                     
                                     # Send WAV data - first response goes out immediately
                                     await websocket.send_bytes(wav_data)
+                                elif audio_format == "mp3":
+                                    # Create in-memory MP3 file using FFmpeg
+                                    process = subprocess.Popen(
+                                        [
+                                            "ffmpeg",
+                                            "-f", "s16le",      # 16-bit PCM input
+                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                            "-ac", "1",         # Mono
+                                            "-i", "pipe:0",     # Read from stdin
+                                            "-c:a", "libmp3lame",
+                                            "-b:a", "128k",     # MP3 bitrate
+                                            "-f", "mp3",
+                                            "pipe:1"            # Output to stdout
+                                        ],
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    
+                                    # Convert the pytorch tensor to PCM data
+                                    chunk_pcm = np.clip(first_audio_chunk.squeeze().cpu().numpy(), -1, 1)
+                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                    
+                                    # Send the PCM data to ffmpeg and get mp3 data
+                                    mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                    
+                                    if process.returncode != 0:
+                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                    else:
+                                        # Send the mp3 data - first response goes out immediately
+                                        await websocket.send_bytes(mp3_data)
                                 else:  # opus
                                     # Use FFmpeg to encode to opus
                                     process = subprocess.Popen(
@@ -1743,6 +1931,38 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                         
                                         # Send WAV data
                                         await websocket.send_bytes(wav_data)
+                                    elif audio_format == "mp3":
+                                        # Create in-memory MP3 file using FFmpeg
+                                        process = subprocess.Popen(
+                                            [
+                                                "ffmpeg",
+                                                "-f", "s16le",      # 16-bit PCM input
+                                                "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                                "-ac", "1",         # Mono
+                                                "-i", "pipe:0",     # Read from stdin
+                                                "-c:a", "libmp3lame",
+                                                "-b:a", "128k",     # MP3 bitrate
+                                                "-f", "mp3",
+                                                "pipe:1"            # Output to stdout
+                                            ],
+                                            stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE
+                                        )
+                                        
+                                        # Convert the pytorch tensor to PCM data
+                                        chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                        chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                        
+                                        # Send the PCM data to ffmpeg and get mp3 data
+                                        mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                        
+                                        if process.returncode != 0:
+                                            print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                            continue
+                                        
+                                        # Send the mp3 data
+                                        await websocket.send_bytes(mp3_data)
                                     else:  # opus
                                         # Use FFmpeg to encode to opus
                                         process = subprocess.Popen(
@@ -1815,6 +2035,38 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                     
                                     # Send WAV data
                                     await websocket.send_bytes(wav_data)
+                                elif audio_format == "mp3":
+                                    # Create in-memory MP3 file using FFmpeg
+                                    process = subprocess.Popen(
+                                        [
+                                            "ffmpeg",
+                                            "-f", "s16le",      # 16-bit PCM input
+                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                            "-ac", "1",         # Mono
+                                            "-i", "pipe:0",     # Read from stdin
+                                            "-c:a", "libmp3lame",
+                                            "-b:a", "128k",     # MP3 bitrate
+                                            "-f", "mp3",
+                                            "pipe:1"            # Output to stdout
+                                        ],
+                                        stdin=subprocess.PIPE,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE
+                                    )
+                                    
+                                    # Convert the pytorch tensor to PCM data
+                                    chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                    
+                                    # Send the PCM data to ffmpeg and get mp3 data
+                                    mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                    
+                                    if process.returncode != 0:
+                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                        continue
+                                    
+                                    # Send the mp3 data
+                                    await websocket.send_bytes(mp3_data)
                                 else:  # opus
                                     # Use FFmpeg to encode to opus
                                     process = subprocess.Popen(
@@ -1934,7 +2186,7 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
                 chunk_audio = (chunk_audio * 32767).astype(np.int16)
                 wavfile.write(chunk_path, 24000, chunk_audio)
                 print(f"Saved WAV audio chunk")
-            else:  # opus
+            elif audio_format == "opus":
                 # Use the same FFmpeg approach as in /tts endpoint
                 # Normalize and convert to 16-bit PCM
                 chunk_audio = np.clip(chunk_audio, -1, 1)
@@ -1963,6 +2215,29 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
                     pass
                     
                 print(f"Saved Opus audio chunk using same method as /tts")
+            elif audio_format == "mp3":
+                # Use FFmpeg to encode to MP3
+                # Save as WAV first
+                temp_wav_path = chunk_path.replace(".mp3", ".temp.wav")
+                wavfile.write(temp_wav_path, 24000, chunk_audio)
+                
+                # Convert to MP3 using FFmpeg
+                subprocess.run([
+                    "ffmpeg",
+                    "-i", temp_wav_path,
+                    "-c:a", "libmp3lame",
+                    "-b:a", "128k",
+                    chunk_path,
+                    "-y"  # Overwrite if exists
+                ], check=False, capture_output=True)
+                
+                # Remove temporary WAV file
+                try:
+                    os.remove(temp_wav_path)
+                except:
+                    pass
+                
+                print(f"Saved MP3 audio chunk")
         else:
             print(f"Error: chunk is not a tensor, got {type(chunk)}")
     except Exception as e:
@@ -2091,7 +2366,7 @@ async def generate_audio_http(
         audio_format = request.audioFormat.lower() if request.audioFormat else "opus"
         
         # Validate audio format
-        if audio_format not in ["wav", "opus"]:
+        if audio_format not in ["wav", "opus", "mp3"]:
             error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
             return {"errorCode": error["errorCode"], "message": error["message"]}
         
@@ -2344,7 +2619,7 @@ async def generate_audio_http_stream(
         audio_format = request.audioFormat.lower() if request.audioFormat else "opus"
         
         # Validate audio format
-        if audio_format not in ["wav", "opus"]:
+        if audio_format not in ["wav", "opus", "mp3"]:
             error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
             return JSONResponse(
                 status_code=400,
