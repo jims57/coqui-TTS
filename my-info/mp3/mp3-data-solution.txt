@@ -13,3 +13,17 @@ Making this work with iOS clients:
 On the server side: You could modify the FFmpeg parameters to create "headerless" MP3 chunks for all but the first chunk
 On the client side: iOS can be configured to recognize "raw" MP3 frames without headers for the middle chunks
 Alternative approach: Use MP3 streaming format (like Icecast/SHOUTcast protocol) which handles this automatically
+
+
+Based on the hex dump in your Image 2, your MP3 file (1745756144574-full.mp3) uses ID3v2.4.
+The first bytes in your hex dump are:
+49 44 33 04 00 00 00 00 00 23 54 53 53 45 00 00
+This can be decoded as:
+"ID3" (49 44 33) - Identifies this as an ID3v2 tag
+"04" - Version 2.4
+"00" - Revision 0
+The following bytes define flags and size information
+ID3v2.4 is the most recent version of the ID3 standard, published in November 2000. It supports 83 different frame types and allows the tag to be stored at either the beginning or end of the file (yours is at the beginning, which is most common).
+This is a good sign as ID3v2.4 is the most modern and feature-rich version of the ID3 standard, offering better support for Unicode text and more flexible frame options than older versions.
+
+https://www.the-roberts-family.net/metadata/mp3.html
