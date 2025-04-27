@@ -1,0 +1,15 @@
+Based on the hex dump in image 2 and the ID3 format information from the link, I can see that your MP3 file does conform to the ID3v2 standard. The file starts with "ID3" (hex 49 44 33) which is the proper ID3 tag identifier, followed by version information and other metadata fields.
+The approach of collecting all audio chunks in a buffer and then converting to a single MP3 at the end has eliminated the "dada" sound issue, confirming your theory that intermediate MP3 conversions were the problem.
+To stream individual MP3 chunks without artifacts while still using MP3 format (rather than raw/buffer):
+MP3 headers and footers: Each MP3 chunk will have its own ID3 headers (at the beginning) and potentially ID3v1 footers (at the end). These need to be stripped from all but the first/last chunks.
+For streaming individual MP3 chunks:
+For the first chunk: Keep the ID3 header intact
+For middle chunks: Remove the ID3v2 headers (typically the first 10 bytes plus the size indicated in the header)
+For all chunks except the last: Remove any ID3v1 footer (last 128 bytes if present)
+For the last chunk: Keep the ID3v1 footer intact if present
+
+
+Making this work with iOS clients:
+On the server side: You could modify the FFmpeg parameters to create "headerless" MP3 chunks for all but the first chunk
+On the client side: iOS can be configured to recognize "raw" MP3 frames without headers for the middle chunks
+Alternative approach: Use MP3 streaming format (like Icecast/SHOUTcast protocol) which handles this automatically
