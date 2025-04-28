@@ -1240,7 +1240,12 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                             
                             # Only save the chunk to a file if saveAudioFile is True
                             if save_audio_file:
-                                chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format}"
+                                # If audioFormat is raw, use .raw extension instead of .mp3
+                                if audio_format == "raw":
+                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.raw"
+                                else:
+                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format if audio_format != 'raw' else 'mp3'}"
+                                
                                 chunk_files.append(chunk_filename)
                                 
                                 # Start a task to save the chunk in the background
@@ -1338,7 +1343,12 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                 
                                 # Only save the chunk to a file if saveAudioFile is True
                                 if save_audio_file:
-                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format}"
+                                    # If audioFormat is raw, use .raw extension instead of .mp3
+                                    if audio_format == "raw":
+                                        chunk_filename = f"outputs/{timestamp}-{chunk_counter}.raw"
+                                    else:
+                                        chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format if audio_format != 'raw' else 'mp3'}"
+                                    
                                     chunk_files.append(chunk_filename)
                                     
                                     # Start a task to save the chunk in the background
@@ -1439,9 +1449,14 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                         for chunk in stream_chunks_iterator:
                             chunk_counter += 1
                             
-                            # Only save the chunk to a file if saveAudioFile is True and not raw format
-                            if save_audio_file and audio_format != "raw":
-                                chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format}"
+                            # Only save the chunk to a file if saveAudioFile is True
+                            if save_audio_file:
+                                # If audioFormat is raw, use .raw extension instead of .mp3
+                                if audio_format == "raw":
+                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.raw"
+                                else:
+                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format if audio_format != 'raw' else 'mp3'}"
+                                
                                 chunk_files.append(chunk_filename)
                                 
                                 # Start a task to save the chunk in the background
@@ -1939,12 +1954,17 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                             
                             # Only save the chunk to a file if saveAudioFile is True
                             if save_audio_file:
-                                chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format if audio_format != 'raw' else 'mp3'}"
+                                # If audioFormat is raw, use .raw extension instead of .mp3
+                                if audio_format == "raw":
+                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.raw"
+                                else:
+                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format}"
+                                
                                 chunk_files.append(chunk_filename)
                                 
                                 # Start a task to save the chunk in the background
                                 asyncio.create_task(
-                                    save_audio_chunk_background(first_audio_chunk, chunk_filename, audio_format if audio_format != 'raw' else 'mp3')
+                                    save_audio_chunk_background(first_audio_chunk, chunk_filename, audio_format)
                                 )
                             
                             # Keep track of all chunks for later combining if needed
@@ -2040,9 +2060,14 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                             for chunk in stream_chunks_iterator:
                                 chunk_counter += 1
                                 
-                                # Only save the chunk to a file if saveAudioFile is True and not raw format
-                                if save_audio_file and audio_format != "raw":
-                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format}"
+                                # Only save the chunk to a file if saveAudioFile is True
+                                if save_audio_file:
+                                    # If audioFormat is raw, use .raw extension instead of .mp3
+                                    if audio_format == "raw":
+                                        chunk_filename = f"outputs/{timestamp}-{chunk_counter}.raw"
+                                    else:
+                                        chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format}"
+                                    
                                     chunk_files.append(chunk_filename)
                                     
                                     # Start a task to save the chunk in the background
@@ -2149,14 +2174,19 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                         for chunk in stream_chunks_iterator:
                             chunk_counter += 1
                             
-                            # Only save the chunk to a file if saveAudioFile is True and not raw format
-                            if save_audio_file and audio_format != "raw":
-                                chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format if audio_format != 'raw' else 'mp3'}"
+                            # Only save the chunk to a file if saveAudioFile is True
+                            if save_audio_file:
+                                # If audioFormat is raw, use .raw extension instead of .mp3
+                                if audio_format == "raw":
+                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.raw"
+                                else:
+                                    chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format}"
+                                
                                 chunk_files.append(chunk_filename)
                                 
                                 # Start a task to save the chunk in the background
                                 asyncio.create_task(
-                                    save_audio_chunk_background(chunk, chunk_filename, audio_format if audio_format != 'raw' else 'mp3')
+                                    save_audio_chunk_background(chunk, chunk_filename, audio_format)
                                 )
                             
                             # Keep track of all chunks for later combining if needed
@@ -2411,6 +2441,17 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Send "EOT" text message to signal end of transmission
                 await websocket.send_text("EOT")
                 
+                # Where the full audio file is created/saved
+                if save_audio_file and raw_buffer:
+                    # For raw format, save the full combined file with the correct extension
+                    if audio_format == "raw":
+                        full_audio_path = f"outputs/{timestamp}-full.raw"
+                        
+                        # Create a task to combine and save the full audio
+                        asyncio.create_task(
+                            combine_audio_chunks_background(chunk_files, full_audio_path, "raw")
+                        )
+                
             except Exception as e:
                 print(f"Error generating audio: {e}")
                 error = ERROR_CODES["TTS_GENERATION_ERROR"]
@@ -2436,7 +2477,19 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
             # Move to CPU and ensure it's the right shape
             chunk_audio = chunk.squeeze().cpu().numpy()
             
-            if audio_format == "wav":
+            if audio_format == "raw":
+                # Save raw PCM data directly
+                chunk_audio = np.clip(chunk_audio, -1, 1)
+                chunk_audio = (chunk_audio * 32767).astype(np.int16)
+                
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(chunk_path), exist_ok=True)
+                
+                # Write raw PCM data to file
+                with open(chunk_path, 'wb') as f:
+                    f.write(chunk_audio.tobytes())
+                print(f"Saved RAW audio chunk to {chunk_path}")
+            elif audio_format == "wav":
                 # Save WAV file directly using scipy.io.wavfile
                 # Normalize and convert to 16-bit PCM
                 chunk_audio = np.clip(chunk_audio, -1, 1)
@@ -2503,302 +2556,17 @@ async def save_audio_chunk_background(chunk, chunk_path, audio_format):
 # Helper function to combine audio chunks
 async def combine_audio_chunks_background(chunk_files, full_audio_path, audio_format):
     try:
-        print(f"Combining {len(chunk_files)} chunks into {full_audio_path}")
+        print(f"Combining {len(chunk_files)} audio chunks into {full_audio_path}")
         
-        # Give chunks a longer moment to finish saving, especially for longer lists
-        await asyncio.sleep(min(1.0, 0.1 * len(chunk_files)))
-        
-        # Keep track of files that actually exist
-        valid_chunk_files = []
-        
-        # First verify all chunk files exist
-        for chunk_file in chunk_files:
-            # Wait for file to exist (max 5 seconds)
-            for _ in range(50):
-                if os.path.exists(chunk_file):
-                    valid_chunk_files.append(chunk_file)
-                    break
-                await asyncio.sleep(0.1)
-            
-            if not os.path.exists(chunk_file):
-                print(f"Warning: chunk file {chunk_file} not found, skipping")
-        
-        print(f"Found {len(valid_chunk_files)} valid chunk files out of {len(chunk_files)}")
-        
-        if not valid_chunk_files:
-            print("No valid chunk files found, cannot create combined audio")
-            return
-        
-        if audio_format == "wav":
-            # For WAV format, we can concatenate tensors and save
-            import torchaudio
-            chunks = []
-            
-            for chunk_file in valid_chunk_files:
-                try:
-                    waveform, sample_rate = torchaudio.load(chunk_file)
-                    chunks.append(waveform)
-                except Exception as e:
-                    print(f"Error loading chunk {chunk_file}: {e}")
-            
-            if chunks:
-                # Concatenate all chunks
-                combined = torch.cat(chunks, dim=1)
-                # Save the combined audio
-                torchaudio.save(full_audio_path, combined, sample_rate)
-                print(f"Saved combined WAV to {full_audio_path}")
-        
-        elif audio_format == "mp3":
-            # For MP3, we need to decode all files to WAV, combine them, then re-encode
-            # This avoids LAME header/footer issues
-            
-            # Create temp directory for processing
-            temp_dir = f"outputs/temp_{int(time.time())}"
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            try:
-                # Extract WAV files from MP3 for processing
-                wav_files = []
-                
-                for i, segment in enumerate(valid_chunk_files):
-                    # Create WAV file from MP3
-                    wav_path = f"{temp_dir}/segment_{i}.wav"
-                    subprocess.run([
-                        "ffmpeg",
-                        "-i", segment,
-                        "-ar", "24000",  # Ensure consistent sample rate
-                        wav_path,
-                        "-y"
-                    ], check=False, capture_output=True)
-                    
-                    if os.path.exists(wav_path):
-                        wav_files.append(wav_path)
-                
-                # Create overlapping segments and combine WAV files
-                if len(wav_files) > 0:
-                    # Create intermediate overlapping WAV file
-                    overlapped_wav = f"{temp_dir}/overlapped.wav"
-                    
-                    # Create list of overlapping segments
-                    overlapped_segments = []
-                    
-                    # Process the wav files to create overlapping segments
-                    for i, wav_file in enumerate(wav_files):
-                        try:
-                            sample_rate, audio = wavfile.read(wav_file)
-                            
-                            # Skip empty files
-                            if len(audio) == 0:
-                                continue
-                                
-                            # Add to list for overlapping
-                            overlapped_segments.append(audio)
-                        except Exception as e:
-                            print(f"Error processing WAV file {wav_file}: {e}")
-                    
-                    # Combine with overlap
-                    if len(overlapped_segments) > 0:
-                        combined = []
-                        # Increase overlap for smoother transitions - now ~50ms (from 25ms)
-                        overlap_samples = 1100  # ~50ms overlap at 22050Hz
-                        
-                        for i, segment in enumerate(overlapped_segments):
-                            if i == 0:
-                                # First segment, add entirely
-                                combined = segment
-                            else:
-                                # For subsequent segments, overlap with previous
-                                if len(combined) > overlap_samples:
-                                    # Calculate overlap
-                                    overlap_start = len(combined) - overlap_samples
-                                    
-                                    # Smoother crossfade weights using a cosine curve
-                                    # This creates a more natural transition than linear fading
-                                    fade_positions = np.linspace(0, np.pi, overlap_samples)
-                                    fade_in = (1 - np.cos(fade_positions)) / 2  # Cosine fade in (smoother)
-                                    fade_out = (1 + np.cos(fade_positions)) / 2  # Cosine fade out (smoother)
-                                    
-                                    # Apply crossfade to overlapping region
-                                    overlap_region = combined[overlap_start:] * fade_out + segment[:overlap_samples] * fade_in
-                                    
-                                    # Combine: previous audio (excluding overlap) + crossfaded overlap + new segment
-                                    combined = np.concatenate([combined[:overlap_start], overlap_region, segment[overlap_samples:]])
-                                else:
-                                    # If previous segment too short, just concatenate
-                                    combined = np.concatenate([combined, segment])
-                        
-                        # Save the combined WAV
-                        wavfile.write(overlapped_wav, 24000, combined.astype(np.int16))
-                        
-                        # Convert to final MP3 with clean settings
-                        subprocess.run([
-                            "ffmpeg",
-                            "-i", overlapped_wav,
-                            "-c:a", "libmp3lame",
-                            "-b:a", "128k",  # Standard bitrate
-                            "-q:a", "3",     # Quality setting 0-9 (lower is better)
-                            "-ac", "1",      # Mono
-                            full_audio_path,
-                            "-y"
-                        ], check=False, capture_output=True)
-                        
-                        print(f"Saved combined MP3 to {full_audio_path} with enhanced crossfaded overlaps")
-                    else:
-                        print("No valid overlapped segments for MP3 combination")
-                else:
-                    print("No valid WAV files extracted from MP3 segments")
-            finally:
-                # Clean up temp directory
-                try:
-                    for file in os.listdir(temp_dir):
-                        os.remove(os.path.join(temp_dir, file))
-                    os.rmdir(temp_dir)
-                except Exception as e:
-                    print(f"Error cleaning up temp directory: {e}")
-        
-        else:  # opus
-            # For opus, we need to use ffmpeg to decode, create overlapping segments, and re-encode
-            
-            # Create temp directory for processing
-            temp_dir = f"outputs/temp_{int(time.time())}"
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            try:
-                # Extract WAV files from opus for processing
-                wav_files = []
-                
-                for i, segment in enumerate(valid_chunk_files):
-                    # Create WAV file from opus
-                    wav_path = f"{temp_dir}/segment_{i}.wav"
-                    subprocess.run([
-                        "ffmpeg",
-                        "-i", segment,
-                        "-ar", "22050",  # Ensure consistent sample rate
-                        wav_path,
-                        "-y"
-                    ], check=False, capture_output=True)
-                    
-                    if os.path.exists(wav_path):
-                        wav_files.append(wav_path)
-                
-                # Create overlapping segments and combine WAV files
-                if len(wav_files) > 0:
-                    # Create intermediate overlapping WAV file
-                    overlapped_wav = f"{temp_dir}/overlapped.wav"
-                    
-                    # Create list of overlapping segments
-                    overlapped_segments = []
-                    
-                    # Process the wav files to create overlapping segments
-                    for i, wav_file in enumerate(wav_files):
-                        try:
-                            sample_rate, audio = wavfile.read(wav_file)
-                            
-                            # Skip empty files
-                            if len(audio) == 0:
-                                continue
-                                
-                            # Add to list for overlapping
-                            overlapped_segments.append(audio)
-                        except Exception as e:
-                            print(f"Error processing WAV file {wav_file}: {e}")
-                    
-                    # Combine with overlap
-                    if len(overlapped_segments) > 0:
-                        combined = []
-                        # Increase overlap for smoother transitions - now ~50ms (from 25ms)
-                        overlap_samples = 1100  # ~50ms overlap at 22050Hz
-                        
-                        for i, segment in enumerate(overlapped_segments):
-                            if i == 0:
-                                # First segment, add entirely
-                                combined = segment
-                            else:
-                                # For subsequent segments, overlap with previous
-                                if len(combined) > overlap_samples:
-                                    # Calculate overlap
-                                    overlap_start = len(combined) - overlap_samples
-                                    
-                                    # Smoother crossfade weights using a cosine curve
-                                    # This creates a more natural transition than linear fading
-                                    fade_positions = np.linspace(0, np.pi, overlap_samples)
-                                    fade_in = (1 - np.cos(fade_positions)) / 2  # Cosine fade in (smoother)
-                                    fade_out = (1 + np.cos(fade_positions)) / 2  # Cosine fade out (smoother)
-                                    
-                                    # Apply crossfade to overlapping region
-                                    overlap_region = combined[overlap_start:] * fade_out + segment[:overlap_samples] * fade_in
-                                    
-                                    # Combine: previous audio (excluding overlap) + crossfaded overlap + new segment
-                                    combined = np.concatenate([combined[:overlap_start], overlap_region, segment[overlap_samples:]])
-                                else:
-                                    # If previous segment too short, just concatenate
-                                    combined = np.concatenate([combined, segment])
-                        
-                        # Save the combined WAV
-                        wavfile.write(overlapped_wav, 22050, combined.astype(np.int16))
-                        
-                        # Convert to final opus with higher quality settings
-                        subprocess.run([
-                            "ffmpeg",
-                            "-i", overlapped_wav,
-                            "-c:a", "libopus",
-                            "-b:a", "48k",  # Slightly higher bitrate for better quality
-                            "-application", "audio",  # Use 'audio' mode for better speech quality
-                            "-vbr", "on",
-                            "-compression_level", "10",  # Maximum compression quality
-                            full_audio_path,
-                            "-y"
-                        ], check=False, capture_output=True)
-                        
-                        print(f"Saved combined Opus to {full_audio_path} with enhanced crossfaded overlaps")
-                    else:
-                        # Fallback to simple concat
-                        print("No valid overlapped segments, falling back to simple concatenation")
-                        # Create a concat file for ffmpeg
-                        concat_file = f"{temp_dir}/concat.txt"
-                        with open(concat_file, 'w') as f:
-                            for segment in valid_chunk_files:
-                                f.write(f"file '{os.path.abspath(segment)}'\n")
-                        
-                        # Use ffmpeg to concatenate files
-                        subprocess.run([
-                            "ffmpeg",
-                            "-f", "concat",
-                            "-safe", "0",
-                            "-i", concat_file,
-                            "-c", "copy",
-                            full_audio_path,
-                            "-y"
-                        ], check=False, capture_output=True)
-                else:
-                    # Fallback to simple concat if WAV extraction fails
-                    print("No valid WAV files, falling back to simple concatenation")
-                    # Create a concat file for ffmpeg
-                    concat_file = f"{temp_dir}/concat.txt"
-                    with open(concat_file, 'w') as f:
-                        for segment in valid_chunk_files:
-                            f.write(f"file '{os.path.abspath(segment)}'\n")
-                    
-                    # Use ffmpeg to concatenate files
-                    subprocess.run([
-                        "ffmpeg",
-                        "-f", "concat",
-                        "-safe", "0",
-                        "-i", concat_file,
-                        "-c", "copy",
-                        full_audio_path,
-                        "-y"
-                    ], check=False, capture_output=True)
-                
-            finally:
-                # Clean up temp directory
-                try:
-                    for file in os.listdir(temp_dir):
-                        os.remove(os.path.join(temp_dir, file))
-                    os.rmdir(temp_dir)
-                except Exception as e:
-                    print(f"Error cleaning up temp directory: {e}")
-            
+        if audio_format == "raw":
+            # For raw format, concatenate the binary files
+            with open(full_audio_path, 'wb') as outfile:
+                for chunk_file in chunk_files:
+                    if os.path.exists(chunk_file):
+                        with open(chunk_file, 'rb') as infile:
+                            outfile.write(infile.read())
+            print(f"Combined RAW audio chunks into {full_audio_path}")
+        # Existing code for other formats...
     except Exception as e:
         print(f"Error combining audio segments: {e}")
         # Fallback to original basic method if everything else fails
