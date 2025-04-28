@@ -866,15 +866,85 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                 # Send "EOT" text message to signal end of transmission
                 await websocket.send_text("EOT")
                 
+                # Initialize combine_task to None to avoid reference errors
+                combine_task = None
+                
+                # Only combine and save audio files if saveAudioFile is True
+                if save_audio_file:
+                    # Full audio file path (for raw format, only save the final mp3)
+                    if audio_format == "raw":
+                        full_audio_path = f"outputs/{timestamp}-full.mp3"
+                        # For raw format, we don't need to combine chunk files as they weren't saved individually
+                        if len(raw_buffer) > 0:
+                            # Save the combined raw buffer to MP3 directly
+                            # This will be done only once after all chunks are processed
+                            all_audio = torch.cat([chunk.squeeze() for chunk in raw_buffer], dim=0)
+                            combined_audio = all_audio.cpu().numpy()
+                            
+                            # Convert and save as MP3
+                            try:
+                                # Create MP3 file
+                                combined_pcm = np.clip(combined_audio, -1, 1)
+                                combined_pcm = (combined_pcm * 32767).astype(np.int16)
+                                
+                                # Save using FFmpeg with high quality settings
+                                process = subprocess.Popen(
+                                    [
+                                        "ffmpeg",
+                                        "-f", "s16le",
+                                        "-ar", "24000",
+                                        "-ac", "1",
+                                        "-i", "pipe:0",
+                                        "-c:a", "libmp3lame",
+                                        "-b:a", "128k",
+                                        "-q:a", "2",
+                                        "-joint_stereo", "0",
+                                        full_audio_path,
+                                        "-y"
+                                    ],
+                                    stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE
+                                )
+                                _, stderr = process.communicate(input=combined_pcm.tobytes())
+                                
+                                if process.returncode == 0:
+                                    print(f"Successfully saved combined raw audio to MP3: {full_audio_path}")
+                                else:
+                                    print(f"Error saving combined raw audio: {stderr.decode('utf-8', errors='ignore')}")
+                            except Exception as e:
+                                print(f"Exception saving combined raw audio: {e}")
+                        
+                        # For raw format, no need to run the combine task since we did it directly
+                        combine_task = None
+                    else:
+                        # For other formats, proceed with normal combination
+                        full_audio_path = f"outputs/{timestamp}-full.{audio_format}"
+                        # Start a task to combine all chunk files in the background
+                        combine_task = asyncio.create_task(
+                            combine_audio_chunks_background(chunk_files, full_audio_path, audio_format)
+                        )
+                
+                # Only save info log if saveLog is true
+                if save_log:
+                    # Create a text file with information about the chunked generation
+                    info_path = f"outputs/info_{timestamp}.txt"
+                    asyncio.create_task(
+                        save_tts_info_background(text, language, None, len(chunk_files), info_path, chunk_files, full_audio_path)
+                    )
+                
                 # Wait for the combination task to complete before scheduling cleanup
-                # This ensures all segments are combined before any cleanup happens
                 try:
                     # Wait for combine task with a reasonable timeout
-                    await asyncio.wait_for(combine_task, timeout=30.0)
-                    print(f"Audio combination completed for {full_audio_path}")
+                    if combine_task is not None:  # Only wait if the task was created
+                        await asyncio.wait_for(combine_task, timeout=30.0)
+                        print(f"Audio combination completed for {full_audio_path}")
                     
-                    # Now schedule WAV cleanup without waiting for it to complete
-                    # But make sure we don't delete the segment files we just created
+                    # Print the "Time to first chunk" information again before cleanup
+                    print(f"Time to first chunk: {first_chunk_time:.2f} ms")
+                    
+                    # Schedule WAV cleanup without waiting for it to complete
+                    print("Starting cleanup process...")
                     asyncio.create_task(
                         async_clean_wav_files(
                             exclude_patterns=[f"{timestamp}-*.{audio_format}", f"{timestamp}-full.{audio_format}"]
@@ -884,6 +954,13 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                     print(f"Warning: Audio combination timed out for {full_audio_path}")
                 except Exception as e:
                     print(f"Error waiting for audio combination: {e}")
+                else:
+                    # Print the "Time to first chunk" information again before cleanup
+                    print(f"Time to first chunk: {first_chunk_time:.2f} ms")
+                    
+                    # If we're not saving audio files, still run the cleanup to remove older files
+                    print("Starting cleanup process...")
+                    asyncio.create_task(async_clean_wav_files())
                 
             except Exception as e:
                 print(f"Error generating audio: {e}")
@@ -1054,7 +1131,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 
                 # Split text by punctuation for better TTS quality
                 # Define punctuation for splitting
-                punctuation_markers = ['.', '!', '?', ';', ',', ':', '。', '！', '？', '；', '，', '：']
+                punctuation_markers = ['.', '!', '?', ';', ',', ':', '。', '！', '、', '？', '；', '，', '：']
                 
                 # Function to split text by punctuation while keeping the punctuation
                 def split_by_punctuation(text):
@@ -1525,8 +1602,9 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                 # Wait for the combination task to complete before scheduling cleanup
                 try:
                     # Wait for combine task with a reasonable timeout
-                    await asyncio.wait_for(combine_task, timeout=30.0)
-                    print(f"Audio combination completed for {full_audio_path}")
+                    if combine_task is not None:  # Only wait if the task was created
+                        await asyncio.wait_for(combine_task, timeout=30.0)
+                        print(f"Audio combination completed for {full_audio_path}")
                     
                     # Print the "Time to first chunk" information again before cleanup
                     print(f"Time to first chunk: {first_chunk_time:.2f} ms")
@@ -1619,7 +1697,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Extract required parameters from the JSON
                 text = message.get("text", "")
                 language = message.get("language", "en").lower()
-                # Handle "zh" language code - convert it to "zh-cn"
+                # Handle "zh" language code - convert it to "zh-cn"（Changing zh to zh-cn is intentional, don'te delete the code）
                 if language == "zh":
                     language = "zh-cn"
                     print("Converted language code 'zh' to 'zh-cn'")
@@ -1685,7 +1763,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
             
-            print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}, speed: {speed}, speakerId: {speaker_id}, reference_audio: {reference_audio}")
+            print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}")
             
             # Validate audio format
             if audio_format not in ["wav", "opus", "mp3", "raw"]:
@@ -2225,6 +2303,15 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Print parameter values before cleanup starts
                 print(f"Parameters used - language: {language}, audioFormat: {audio_format}, saveAudioFile: {save_audio_file}, saveLog: {save_log}, speed: {speed}, speakerId: {speaker_id}, reference_audio: {reference_audio}")
                 
+                # Send an empty chunk to signal completion
+                await websocket.send_bytes(b'')
+                
+                # Send "EOT" text message to signal end of transmission
+                await websocket.send_text("EOT")
+                
+                # Initialize combine_task to None to avoid reference errors
+                combine_task = None
+                
                 # Only combine and save audio files if saveAudioFile is True
                 if save_audio_file:
                     # Full audio file path (for raw format, only save the final mp3)
@@ -2292,8 +2379,9 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Wait for the combination task to complete before scheduling cleanup
                 try:
                     # Wait for combine task with a reasonable timeout
-                    await asyncio.wait_for(combine_task, timeout=30.0)
-                    print(f"Audio combination completed for {full_audio_path}")
+                    if combine_task is not None:  # Only wait if the task was created
+                        await asyncio.wait_for(combine_task, timeout=30.0)
+                        print(f"Audio combination completed for {full_audio_path}")
                     
                     # Print the "Time to first chunk" information again before cleanup
                     print(f"Time to first chunk: {first_chunk_time:.2f} ms")
