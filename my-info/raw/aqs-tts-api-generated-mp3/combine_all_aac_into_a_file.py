@@ -25,16 +25,21 @@ def combine_aac_files(directory):
         if not files:
             continue
         
-        # Create the combined audio
-        combined = AudioSegment.empty()
+        # Create the combined audio - decode to raw PCM first
+        combined = None
         for _, filename in files:
             file_path = os.path.join(directory, filename)
+            # Convert to raw PCM first to avoid header/footer issues
             audio = AudioSegment.from_file(file_path, format="aac")
-            combined += audio
+            
+            if combined is None:
+                combined = audio
+            else:
+                combined = combined + audio
         
-        # Export the combined audio - use m4a container with aac codec
+        # Export using m4a container which is appropriate for AAC audio
         output_file = os.path.join(directory, f"{prefix}-full.aac")
-        combined.export(output_file, format="ipod", codec="aac")
+        combined.export(output_file, format="ipod")
         print(f"Created combined file: {output_file}")
 
 if __name__ == "__main__":
