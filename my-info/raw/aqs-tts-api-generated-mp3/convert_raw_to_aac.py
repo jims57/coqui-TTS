@@ -1,11 +1,11 @@
 import os
 import subprocess
-import glob2
+import glob
 
-def convert_raw_to_mp3(raw_file, mp3_file):
-    """Convert a raw audio file to MP3 format using FFmpeg."""
+def convert_raw_to_aac(raw_file, aac_file):
+    """Convert a raw audio file to AAC format using FFmpeg."""
     try:
-        # Run FFmpeg command to convert raw to MP3
+        # Run FFmpeg command to convert raw to AAC
         subprocess.run(
             [
                 "ffmpeg",
@@ -13,11 +13,11 @@ def convert_raw_to_mp3(raw_file, mp3_file):
                 "-ar", "24000",     # Sample rate - XTTS uses 24kHz
                 "-ac", "1",         # Mono
                 "-i", raw_file,     # Input file
-                "-c:a", "libmp3lame",
-                "-b:a", "128k",     # MP3 bitrate
+                "-c:a", "aac",
+                "-b:a", "128k",     # AAC bitrate
                 "-q:a", "2",        # Quality setting - lower is better
                 "-joint_stereo", "0", # Follow MP3 standard for better compatibility
-                mp3_file,           # Output file
+                aac_file,           # Output file
                 "-y"                # Overwrite if exists
             ],
             check=False,
@@ -25,7 +25,7 @@ def convert_raw_to_mp3(raw_file, mp3_file):
         )
         return True
     except Exception as e:
-        print(f"Error converting {raw_file} to MP3: {e}")
+        print(f"Error converting {raw_file} to AAC: {e}")
         return False
 
 def main():
@@ -42,13 +42,13 @@ def main():
     failed = 0
     
     for raw_file in raw_files:
-        # Create output filename (replace .raw with .mp3)
-        mp3_file = os.path.splitext(raw_file)[0] + ".mp3"
+        # Create output filename (replace .raw with .aac)
+        aac_file = os.path.splitext(raw_file)[0] + ".aac"
         
-        print(f"Converting {raw_file} to {mp3_file}...")
+        print(f"Converting {raw_file} to {aac_file}...")
         
-        if convert_raw_to_mp3(raw_file, mp3_file):
-            print(f"Successfully converted {raw_file} to {mp3_file}")
+        if convert_raw_to_aac(raw_file, aac_file):
+            print(f"Successfully converted {raw_file} to {aac_file}")
             successful += 1
         else:
             print(f"Failed to convert {raw_file}")
