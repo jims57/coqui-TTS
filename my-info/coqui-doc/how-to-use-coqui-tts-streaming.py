@@ -29,6 +29,7 @@ for i, chunk in enumerate(chunks):
     if i == 0:
         print(f"Time to first chunck: {time.time() - t0}")
     print(f"Received chunk {i} of audio length {chunk.shape[-1]}")
+    # -1 means the last dimension of the tensor, which represents the length of the audio in samples
     wav_chuncks.append(chunk)
 wav = torch.cat(wav_chuncks, dim=0)
 torchaudio.save("xtts_streaming.wav", wav.squeeze().unsqueeze(0).cpu(), 24000)
