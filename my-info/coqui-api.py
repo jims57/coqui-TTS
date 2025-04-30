@@ -1744,7 +1744,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Convert speed to float if it's a string
                 if isinstance(speed, str):
                     try:
-                        speed = float(speed)
+                        speed = round(speed, 1)
                     except ValueError:
                         # If conversion fails, use default
                         speed = 1.0
@@ -1907,7 +1907,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 import io
                 
                 # Set up streaming parameters
-                stream_chunk_size = 10  # Larger chunks for better continuity
+                stream_chunk_size = 2000  # Larger chunks for better continuity
                 overlap_wav_len = 3072  # Overlap for smoother transitions
                 
                 print(f"Using stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len}, speed={speed}")
