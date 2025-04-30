@@ -117,15 +117,17 @@ global_cached_latents = {}
 
 # Add this near the top of the file with other global variables
 SPEAKER_IDS = {
-    1: "reference_samples/andy-liu-en-1.wav",
+    # 1: "reference_samples/andy-liu-en-1.wav",
+    1: "reference_samples/ms-speaker-female-1.mp3",
     2: "reference_samples/jack-mark-en-1.wav",
     3: "reference_samples/leijun.wav",
     4: "reference_samples/speaker2.mp3",
+    5: "reference_samples/andy-liu-en-1.wav",
     # Default to andy-liu-en-1.wav for any other value
 }
 
 # Default speaker reference audio to use if speakerId is invalid or not provided
-DEFAULT_SPEAKER_AUDIO = "reference_samples/andy-liu-en-1.wav"
+DEFAULT_SPEAKER_AUDIO = "reference_samples/ms-speaker-female-1.mp3"
 
 def initialize_tts():
     global global_tts, global_chinese_tts
