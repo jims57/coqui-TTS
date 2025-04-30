@@ -1750,6 +1750,12 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     except ValueError:
                         # If conversion fails, use default
                         speed = 1.0
+
+                # Adjust speed for speakerId = 1 and language = en
+                if speaker_id == 1 and language == "en":
+                    original_speed = speed
+                    speed = max(0.1, speed - 0.2)  # Ensure speed doesn't go below 0.1
+                    print(f"Adjusted speed from {original_speed} to {speed} for speakerId=1 and language=en")
                 
                 # Check if there's a config flag in the message and skip text processing
                 if message.get("config", False):
