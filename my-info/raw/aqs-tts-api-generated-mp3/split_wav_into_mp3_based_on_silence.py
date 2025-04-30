@@ -82,9 +82,9 @@ def main():
     # Split audio on silence
     chunks = split_audio_on_silence(
         audio,
-        min_silence_len=30,     # Detect word-level pauses (shorter)
-        silence_thresh=-22,     # More aggressive sensitivity
-        keep_silence=20         # Keep minimal pauses
+        min_silence_len=80,     # Detect phrase-level pauses
+        silence_thresh=-28,     # Moderate sensitivity
+        keep_silence=60         # Keep natural pauses
     )
     
     if not chunks:
