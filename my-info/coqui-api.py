@@ -2345,7 +2345,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 await websocket.send_bytes(b'')
                 
                 # Send "EOT" text message to signal end of transmission
-                await websocket.send_text("EOT")
+                # await websocket.send_text("EOT")
                 
                 # Initialize combine_task to None to avoid reference errors
                 combine_task = None
@@ -2442,12 +2442,6 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     # If we're not saving audio files, still run the cleanup to remove older files
                     print("Starting cleanup process...")
                     asyncio.create_task(async_clean_wav_files())
-                
-                # Send an empty chunk to signal completion
-                await websocket.send_bytes(b'')
-                
-                # Send "EOT" text message to signal end of transmission
-                await websocket.send_text("EOT")
                 
                 # Where the full audio file is created/saved
                 if save_audio_file and raw_buffer:
