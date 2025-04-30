@@ -2,6 +2,7 @@ import os
 import io
 import subprocess
 import numpy as np
+import argparse
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
 
@@ -58,9 +59,13 @@ def export_chunks_to_mp3(chunks, output_dir, base_filename, sample_rate=24000, b
     
     return len(chunks)
 
-def main():
+def main(wavPath=None):
     # Input raw file
     raw_file = "1745912332914-full.raw"
+    
+    # Update raw_file if wavPath is provided
+    if wavPath:
+        raw_file = wavPath
     
     # Check if file exists
     if not os.path.exists(raw_file):
@@ -97,4 +102,8 @@ def main():
     print(f"\nProcessing complete. Split {raw_file} into {num_segments} MP3 segments in '{output_dir}' directory.")
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Split audio file into segments based on silence')
+    parser.add_argument('--wavPath', type=str, help='Path to the raw audio file')
+    args = parser.parse_args()
+    
+    main(args.wavPath)
