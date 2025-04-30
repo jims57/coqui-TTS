@@ -68,7 +68,7 @@ def main():
         return
     
     # Output directory for MP3 segments
-    output_dir = "segments"
+    output_dir = "splited_mp3"
     
     # Base filename for output segments (without extension)
     base_filename = os.path.splitext(os.path.basename(raw_file))[0]
