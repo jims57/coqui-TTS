@@ -82,9 +82,9 @@ def main():
     # Split audio on silence
     chunks = split_audio_on_silence(
         audio,
-        min_silence_len=700,    # Adjust based on your content
-        silence_thresh=-40,     # Adjust based on your audio levels
-        keep_silence=300        # Keep 300ms of silence at segment edges
+        min_silence_len=100,    # Much shorter silence detection
+        silence_thresh=-30,     # Much more sensitive threshold
+        keep_silence=50         # Minimal silence retention
     )
     
     if not chunks:
