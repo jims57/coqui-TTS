@@ -22,39 +22,29 @@ def combine_mp3_files(output_file="combined.mp3"):
         print("No .mp3 files found in the current directory.")
         return False
     
-    # Filter out files that match the segment pattern
-    segment_files = [f for f in mp3_files if re.match(r'\d+-full_segment_\d+\.mp3', f)]
-    
-    if not segment_files:
-        print("No segment mp3 files found in the current directory.")
-        return False
-    
-    # Extract timestamp from the first file to use in output filename
-    match = re.match(r'(\d+)-full_segment_\d+\.mp3', segment_files[0])
-    if match:
-        timestamp = match.group(1)
-        output_file = f"{timestamp}-full.mp3"
-    
     # Sort files naturally to ensure correct order (1, 2, 10 instead of 1, 10, 2)
-    segment_files.sort(key=natural_sort_key)
+    mp3_files.sort(key=natural_sort_key)
     
-    print(f"Found {len(segment_files)} mp3 files to combine.")
-    print(f"Files will be combined in this order: {segment_files}")
+    print(f"Found {len(mp3_files)} mp3 files to combine.")
+    print(f"Files will be combined in this order: {mp3_files}")
     
     # Combine the mp3 files
     combined = AudioSegment.empty()
-    for file in segment_files:
+    for file in mp3_files:
         print(f"Adding {file} to combined mp3...")
         audio = AudioSegment.from_mp3(file)
         combined += audio
     
     # Export the combined mp3
-    combined.export(output_file, format="mp3")
-    print(f"Successfully combined {len(segment_files)} files into {output_file}")
+    combined.export(output_file, format="mp3", bitrate="128k", parameters=["-q:a", "2", "-joint_stereo", "0"])
+    print(f"Successfully combined {len(mp3_files)} files into {output_file}")
     return True
 
 def main():
-    if combine_mp3_files():
+    # Create output filename
+    output_file = "combined_output.mp3"
+    
+    if combine_mp3_files(output_file):
         print("MP3 files combined successfully!")
     else:
         print("Failed to combine MP3 files.")
