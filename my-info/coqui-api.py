@@ -339,6 +339,92 @@ async def generate_audio_ws(text: str, language: str = "en") -> bytes:
         print(f"Error in audio generation: {e}")
         raise
 
+# Add this function before the /aqs-tts endpoint
+async def save_audio_chunk_background(chunk, chunk_path, audio_format):
+    try:
+        print(f"Saving audio chunk to {chunk_path}")
+        
+        # Convert PyTorch tensor to proper format for saving
+        if isinstance(chunk, torch.Tensor):
+            # Move to CPU and ensure it's the right shape
+            chunk_audio = chunk.squeeze().cpu().numpy()
+            
+            if audio_format == "raw":
+                # Save raw PCM data directly
+                chunk_audio = np.clip(chunk_audio, -1, 1)
+                chunk_audio = (chunk_audio * 32767).astype(np.int16)
+                
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(chunk_path), exist_ok=True)
+                
+                # Write raw PCM data to file
+                with open(chunk_path, 'wb') as f:
+                    f.write(chunk_audio.tobytes())
+                print(f"Saved RAW audio chunk to {chunk_path}")
+            elif audio_format == "wav":
+                # Save WAV file directly using scipy.io.wavfile
+                # Normalize and convert to 16-bit PCM
+                chunk_audio = np.clip(chunk_audio, -1, 1)
+                chunk_audio = (chunk_audio * 32767).astype(np.int16)
+                wavfile.write(chunk_path, 24000, chunk_audio)
+                print(f"Saved WAV audio chunk")
+            elif audio_format == "opus":
+                # Use the same FFmpeg approach as in /tts endpoint
+                # Normalize and convert to 16-bit PCM
+                chunk_audio = np.clip(chunk_audio, -1, 1)
+                chunk_audio = (chunk_audio * 32767).astype(np.int16)
+                
+                # Save as WAV first
+                temp_wav_path = chunk_path.replace(".opus", ".temp.wav")
+                wavfile.write(temp_wav_path, 24000, chunk_audio)
+                
+                # Convert to opus using identical FFmpeg parameters as /tts
+                subprocess.run([
+                    "ffmpeg",
+                    "-i", temp_wav_path,
+                    "-c:a", "libopus",
+                    "-b:a", "32k",
+                    "-application", "voip",
+                    "-vbr", "on",
+                    chunk_path,
+                    "-y"  # Overwrite if exists
+                ], check=False, capture_output=True)
+                
+                # Remove temporary WAV file
+                try:
+                    os.remove(temp_wav_path)
+                except:
+                    pass
+                    
+                print(f"Saved Opus audio chunk using same method as /tts")
+            elif audio_format == "mp3":
+                # Use FFmpeg to encode to MP3
+                # Save as WAV first
+                temp_wav_path = chunk_path.replace(".mp3", ".temp.wav")
+                wavfile.write(temp_wav_path, 24000, chunk_audio)
+                
+                # Convert to MP3 using FFmpeg
+                subprocess.run([
+                    "ffmpeg",
+                    "-i", temp_wav_path,
+                    "-c:a", "libmp3lame",
+                    "-b:a", "128k",
+                    chunk_path,
+                    "-y"  # Overwrite if exists
+                ], check=False, capture_output=True)
+                
+                # Remove temporary WAV file
+                try:
+                    os.remove(temp_wav_path)
+                except:
+                    pass
+                
+                print(f"Saved MP3 audio chunk")
+        else:
+            print(f"Error: chunk is not a tensor, got {type(chunk)}")
+    except Exception as e:
+        print(f"Error saving audio chunk: {e}")
+
 # API key configuration
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=False)
@@ -733,7 +819,66 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                                 opus_chunk = opus_data[j:min(j + opus_chunk_size, len(opus_data))]
                                 await websocket.send_bytes(opus_chunk)
                         elif audio_format == "mp3":
-                            # Create in-memory MP3 file using FFmpeg
+                            # For MP3 format, collect audio data for silence-based splitting
+                            mp3_buffer.append(first_audio_chunk)
+                            
+                            # Try to split based on silence
+                            if len(mp3_buffer) > 1:  # Need at least some audio to analyze
+                                # Combine chunks into one tensor for silence analysis
+                                combined_audio = torch.cat([c.squeeze() for c in mp3_buffer], dim=0)
+                                
+                                # Convert to numpy array for processing
+                                numpy_audio = combined_audio.cpu().numpy()
+                                
+                                # Convert to AudioSegment for silence detection (16-bit PCM)
+                                pcm_audio = np.clip(numpy_audio, -1, 1)
+                                pcm_audio = (pcm_audio * 32767).astype(np.int16)
+                                
+                                from pydub import AudioSegment
+                                from pydub.silence import split_on_silence
+                                
+                                audio_segment = AudioSegment(
+                                    data=pcm_audio.tobytes(),
+                                    sample_width=2,  # 16-bit
+                                    frame_rate=24000,
+                                    channels=1
+                                )
+                                
+                                # Split on silence using parameters from split_wav_into_mp3_based_on_silence.py
+                                chunks = split_on_silence(
+                                    audio_segment,
+                                    min_silence_len=80,     # 80ms: Minimum silence to be considered a pause
+                                    silence_thresh=-28,     # -28 dBFS: Threshold for silence
+                                    keep_silence=60         # 60ms: Keep some silence for natural sound
+                                )
+                                
+                                # If we found at least one valid split
+                                if len(chunks) > 1:
+                                    # Convert the first chunk to MP3 and send it
+                                    first_chunk = chunks[0]
+                                    
+                                    # Export to MP3 in memory
+                                    mp3_io = io.BytesIO()
+                                    first_chunk.export(mp3_io, format="mp3", bitrate="128k", parameters=["-ac", "1"])
+                                    mp3_io.seek(0)
+                                    mp3_data = mp3_io.read()
+                                    
+                                    # Send the MP3 data
+                                    await websocket.send_bytes(mp3_data)
+                                    
+                                    # Remove the processed audio from the buffer
+                                    # Calculate how many samples we need to remove (first_chunk length in samples)
+                                    samples_to_remove = len(first_chunk) * 24000 // 1000  # Convert ms to samples
+                                    
+                                    # Skip removing if we don't have enough samples
+                                    if samples_to_remove > 0 and samples_to_remove < combined_audio.shape[0]:
+                                        # Create a new buffer with the remaining audio
+                                        remaining_samples = combined_audio[samples_to_remove:]
+                                        
+                                        # Clear the buffer and add remaining audio as a single chunk
+                                        mp3_buffer = [remaining_samples.unsqueeze(0)]
+                        else:  # opus
+                            # Use FFmpeg to encode to opus
                             process = subprocess.Popen(
                                 [
                                     "ffmpeg",
@@ -741,9 +886,11 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                                     "-ar", "24000",     # Sample rate - XTTS uses 24kHz
                                     "-ac", "1",         # Mono
                                     "-i", "pipe:0",     # Read from stdin
-                                    "-c:a", "libmp3lame",
-                                    "-b:a", "128k",     # MP3 bitrate
-                                    "-f", "mp3",
+                                    "-c:a", "libopus",
+                                    "-b:a", "32k",
+                                    "-application", "voip",
+                                    "-vbr", "on",
+                                    "-f", "opus",
                                     "pipe:1"            # Output to stdout
                                 ],
                                 stdin=subprocess.PIPE,
@@ -755,14 +902,14 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                             chunk_pcm = np.clip(first_audio_chunk.squeeze().cpu().numpy(), -1, 1)
                             chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
                             
-                            # Send the PCM data to ffmpeg and get mp3 data
-                            mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                            # Send the PCM data to ffmpeg and get opus data
+                            opus_data, stderr = process.communicate(input=chunk_pcm.tobytes())
                             
                             if process.returncode != 0:
                                 print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
                             else:
-                                # Send the mp3 data - first response goes out immediately
-                                await websocket.send_bytes(mp3_data)
+                                # Send the opus data - first response goes out immediately
+                                await websocket.send_bytes(opus_data)
                     else:
                         # For subsequent segments, stream immediately after generating
                         chunk_size = 1024
@@ -813,7 +960,66 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                                 opus_chunk = opus_data[j:min(j + opus_chunk_size, len(opus_data))]
                                 await websocket.send_bytes(opus_chunk)
                         elif audio_format == "mp3":
-                            # Create a subprocess for FFmpeg
+                            # For MP3 format, collect audio data for silence-based splitting
+                            mp3_buffer.append(chunk)
+                            
+                            # Try to split based on silence
+                            if len(mp3_buffer) > 1:  # Need at least some audio to analyze
+                                # Combine chunks into one tensor for silence analysis
+                                combined_audio = torch.cat([c.squeeze() for c in mp3_buffer], dim=0)
+                                
+                                # Convert to numpy array for processing
+                                numpy_audio = combined_audio.cpu().numpy()
+                                
+                                # Convert to AudioSegment for silence detection (16-bit PCM)
+                                pcm_audio = np.clip(numpy_audio, -1, 1)
+                                pcm_audio = (pcm_audio * 32767).astype(np.int16)
+                                
+                                from pydub import AudioSegment
+                                from pydub.silence import split_on_silence
+                                
+                                audio_segment = AudioSegment(
+                                    data=pcm_audio.tobytes(),
+                                    sample_width=2,  # 16-bit
+                                    frame_rate=24000,
+                                    channels=1
+                                )
+                                
+                                # Split on silence using parameters from split_wav_into_mp3_based_on_silence.py
+                                chunks = split_on_silence(
+                                    audio_segment,
+                                    min_silence_len=80,     # 80ms: Minimum silence to be considered a pause
+                                    silence_thresh=-28,     # -28 dBFS: Threshold for silence
+                                    keep_silence=60         # 60ms: Keep some silence for natural sound
+                                )
+                                
+                                # If we found at least one valid split
+                                if len(chunks) > 1:
+                                    # Convert the first chunk to MP3 and send it
+                                    first_chunk = chunks[0]
+                                    
+                                    # Export to MP3 in memory
+                                    mp3_io = io.BytesIO()
+                                    first_chunk.export(mp3_io, format="mp3", bitrate="128k", parameters=["-ac", "1"])
+                                    mp3_io.seek(0)
+                                    mp3_data = mp3_io.read()
+                                    
+                                    # Send the MP3 data
+                                    await websocket.send_bytes(mp3_data)
+                                    
+                                    # Remove the processed audio from the buffer
+                                    # Calculate how many samples we need to remove (first_chunk length in samples)
+                                    samples_to_remove = len(first_chunk) * 24000 // 1000  # Convert ms to samples
+                                    
+                                    # Skip removing if we don't have enough samples
+                                    if samples_to_remove > 0 and samples_to_remove < combined_audio.shape[0]:
+                                        # Create a new buffer with the remaining audio
+                                        remaining_samples = combined_audio[samples_to_remove:]
+                                        
+                                        # Clear the buffer and add remaining audio as a single chunk
+                                        mp3_buffer = [remaining_samples.unsqueeze(0)]
+                        else:  # opus
+                            # Use FFmpeg to encode to opus
                             process = subprocess.Popen(
                                 [
                                     "ffmpeg",
@@ -821,9 +1027,11 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                                     "-ar", "24000",     # Sample rate - XTTS uses 24kHz
                                     "-ac", "1",         # Mono
                                     "-i", "pipe:0",     # Read from stdin
-                                    "-c:a", "libmp3lame",
-                                    "-b:a", "128k",     # MP3 bitrate
-                                    "-f", "mp3",
+                                    "-c:a", "libopus",
+                                    "-b:a", "32k",
+                                    "-application", "voip",
+                                    "-vbr", "on",
+                                    "-f", "opus",
                                     "pipe:1"            # Output to stdout
                                 ],
                                 stdin=subprocess.PIPE,
@@ -835,15 +1043,15 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                             chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
                             chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
                             
-                            # Send the PCM data to ffmpeg and get mp3 data
-                            mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                            # Send the PCM data to ffmpeg and get opus data
+                            opus_data, stderr = process.communicate(input=chunk_pcm.tobytes())
                             
                             if process.returncode != 0:
                                 print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
                                 continue
                             
-                            # Send the mp3 data
-                            await websocket.send_bytes(mp3_data)
+                            # Send the opus data
+                            await websocket.send_bytes(opus_data)
                 
                 # Full audio file path
                 full_audio_path = f"outputs/{timestamp}-full.{audio_format}"
@@ -947,11 +1155,7 @@ async def websocket_endpoint(websocket: WebSocket, api_key: Optional[str] = Quer
                     
                     # Schedule WAV cleanup without waiting for it to complete
                     print("Starting cleanup process...")
-                    asyncio.create_task(
-                        async_clean_wav_files(
-                            exclude_patterns=[f"{timestamp}-*.{audio_format}", f"{timestamp}-full.{audio_format}"]
-                        )
-                    )
+                    asyncio.create_task(async_clean_wav_files())
                 except asyncio.TimeoutError:
                     print(f"Warning: Audio combination timed out for {full_audio_path}")
                 except Exception as e:
@@ -1275,36 +1479,64 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                     # Send WAV data - first response goes out immediately
                                     await websocket.send_bytes(wav_data)
                                 elif audio_format == "mp3":
-                                    # Create in-memory MP3 file using FFmpeg
-                                    process = subprocess.Popen(
-                                        [
-                                            "ffmpeg",
-                                            "-f", "s16le",      # 16-bit PCM input
-                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                            "-ac", "1",         # Mono
-                                            "-i", "pipe:0",     # Read from stdin
-                                            "-c:a", "libmp3lame",
-                                            "-b:a", "128k",     # MP3 bitrate
-                                            "-f", "mp3",
-                                            "pipe:1"            # Output to stdout
-                                        ],
-                                        stdin=subprocess.PIPE,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE
-                                    )
+                                    # For MP3 format, collect audio data for silence-based splitting
+                                    mp3_buffer.append(first_audio_chunk)
                                     
-                                    # Convert the pytorch tensor to PCM data
-                                    chunk_pcm = np.clip(first_audio_chunk.squeeze().cpu().numpy(), -1, 1)
-                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
-                                    
-                                    # Send the PCM data to ffmpeg and get mp3 data
-                                    mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
-                                    
-                                    if process.returncode != 0:
-                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                    else:
-                                        # Send the mp3 data - first response goes out immediately
-                                        await websocket.send_bytes(mp3_data)
+                                    # Try to split based on silence
+                                    if len(mp3_buffer) > 1:  # Need at least some audio to analyze
+                                        # Combine chunks into one tensor for silence analysis
+                                        combined_audio = torch.cat([c.squeeze() for c in mp3_buffer], dim=0)
+                                        
+                                        # Convert to numpy array for processing
+                                        numpy_audio = combined_audio.cpu().numpy()
+                                        
+                                        # Convert to AudioSegment for silence detection (16-bit PCM)
+                                        pcm_audio = np.clip(numpy_audio, -1, 1)
+                                        pcm_audio = (pcm_audio * 32767).astype(np.int16)
+                                        
+                                        from pydub import AudioSegment
+                                        from pydub.silence import split_on_silence
+                                        
+                                        audio_segment = AudioSegment(
+                                            data=pcm_audio.tobytes(),
+                                            sample_width=2,  # 16-bit
+                                            frame_rate=24000,
+                                            channels=1
+                                        )
+                                        
+                                        # Split on silence using parameters from split_wav_into_mp3_based_on_silence.py
+                                        chunks = split_on_silence(
+                                            audio_segment,
+                                            min_silence_len=80,     # 80ms: Minimum silence to be considered a pause
+                                            silence_thresh=-28,     # -28 dBFS: Threshold for silence
+                                            keep_silence=60         # 60ms: Keep some silence for natural sound
+                                        )
+                                        
+                                        # If we found at least one valid split
+                                        if len(chunks) > 1:
+                                            # Convert the first chunk to MP3 and send it
+                                            first_chunk = chunks[0]
+                                            
+                                            # Export to MP3 in memory
+                                            mp3_io = io.BytesIO()
+                                            first_chunk.export(mp3_io, format="mp3", bitrate="128k", parameters=["-ac", "1"])
+                                            mp3_io.seek(0)
+                                            mp3_data = mp3_io.read()
+                                            
+                                            # Send the MP3 data
+                                            await websocket.send_bytes(mp3_data)
+                                            
+                                            # Remove the processed audio from the buffer
+                                            # Calculate how many samples we need to remove (first_chunk length in samples)
+                                            samples_to_remove = len(first_chunk) * 24000 // 1000  # Convert ms to samples
+                                            
+                                            # Skip removing if we don't have enough samples
+                                            if samples_to_remove > 0 and samples_to_remove < combined_audio.shape[0]:
+                                                # Create a new buffer with the remaining audio
+                                                remaining_samples = combined_audio[samples_to_remove:]
+                                                
+                                                # Clear the buffer and add remaining audio as a single chunk
+                                                mp3_buffer = [remaining_samples.unsqueeze(0)]
                                 else:  # opus
                                     # Use FFmpeg to encode to opus
                                     process = subprocess.Popen(
@@ -1378,36 +1610,64 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                         # Send WAV data
                                         await websocket.send_bytes(wav_data)
                                     elif audio_format == "mp3":
-                                        # Create in-memory MP3 file using FFmpeg
-                                        process = subprocess.Popen(
-                                            [
-                                                "ffmpeg",
-                                                "-f", "s16le",      # 16-bit PCM input
-                                                "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                                "-ac", "1",         # Mono
-                                                "-i", "pipe:0",     # Read from stdin
-                                                "-c:a", "libmp3lame",
-                                                "-b:a", "128k",     # MP3 bitrate
-                                                "-f", "mp3",
-                                                "pipe:1"            # Output to stdout
-                                            ],
-                                            stdin=subprocess.PIPE,
-                                            stdout=subprocess.PIPE,
-                                            stderr=subprocess.PIPE
-                                        )
+                                        # For MP3 format, collect audio data for silence-based splitting
+                                        mp3_buffer.append(chunk)
                                         
-                                        # Convert the pytorch tensor to PCM data
-                                        chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
-                                        chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
-                                        
-                                        # Send the PCM data to ffmpeg and get mp3 data
-                                        mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
-                                        
-                                        if process.returncode != 0:
-                                            print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                        else:
-                                            # Send the mp3 data - first response goes out immediately
-                                            await websocket.send_bytes(mp3_data)
+                                        # Try to split based on silence
+                                        if len(mp3_buffer) > 1:  # Need at least some audio to analyze
+                                            # Combine chunks into one tensor for silence analysis
+                                            combined_audio = torch.cat([c.squeeze() for c in mp3_buffer], dim=0)
+                                            
+                                            # Convert to numpy array for processing
+                                            numpy_audio = combined_audio.cpu().numpy()
+                                            
+                                            # Convert to AudioSegment for silence detection (16-bit PCM)
+                                            pcm_audio = np.clip(numpy_audio, -1, 1)
+                                            pcm_audio = (pcm_audio * 32767).astype(np.int16)
+                                            
+                                            from pydub import AudioSegment
+                                            from pydub.silence import split_on_silence
+                                            
+                                            audio_segment = AudioSegment(
+                                                data=pcm_audio.tobytes(),
+                                                sample_width=2,  # 16-bit
+                                                frame_rate=24000,
+                                                channels=1
+                                            )
+                                            
+                                            # Split on silence using parameters from split_wav_into_mp3_based_on_silence.py
+                                            chunks = split_on_silence(
+                                                audio_segment,
+                                                min_silence_len=80,     # 80ms: Minimum silence to be considered a pause
+                                                silence_thresh=-28,     # -28 dBFS: Threshold for silence
+                                                keep_silence=60         # 60ms: Keep some silence for natural sound
+                                            )
+                                            
+                                            # If we found at least one valid split
+                                            if len(chunks) > 1:
+                                                # Convert the first chunk to MP3 and send it
+                                                first_chunk = chunks[0]
+                                                
+                                                # Export to MP3 in memory
+                                                mp3_io = io.BytesIO()
+                                                first_chunk.export(mp3_io, format="mp3", bitrate="128k", parameters=["-ac", "1"])
+                                                mp3_io.seek(0)
+                                                mp3_data = mp3_io.read()
+                                                
+                                                # Send the MP3 data
+                                                await websocket.send_bytes(mp3_data)
+                                                
+                                                # Remove the processed audio from the buffer
+                                                # Calculate how many samples we need to remove (first_chunk length in samples)
+                                                samples_to_remove = len(first_chunk) * 24000 // 1000  # Convert ms to samples
+                                                
+                                                # Skip removing if we don't have enough samples
+                                                if samples_to_remove > 0 and samples_to_remove < combined_audio.shape[0]:
+                                                    # Create a new buffer with the remaining audio
+                                                    remaining_samples = combined_audio[samples_to_remove:]
+                                                    
+                                                    # Clear the buffer and add remaining audio as a single chunk
+                                                    mp3_buffer = [remaining_samples.unsqueeze(0)]
                                     else:  # opus
                                         # Use FFmpeg to encode to opus
                                         process = subprocess.Popen(
@@ -1486,71 +1746,98 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                                     # Send WAV data
                                     await websocket.send_bytes(wav_data)
                                 elif audio_format == "mp3":
-                                    # Create in-memory MP3 file using FFmpeg
-                                    process = subprocess.Popen(
-                                        [
-                                            "ffmpeg",
-                                            "-f", "s16le",      # 16-bit PCM input
-                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                            "-ac", "1",         # Mono
-                                            "-i", "pipe:0",     # Read from stdin
-                                            "-c:a", "libmp3lame",
-                                            "-b:a", "128k",     # MP3 bitrate
-                                            "-f", "mp3",
-                                            "pipe:1"            # Output to stdout
-                                        ],
-                                        stdin=subprocess.PIPE,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE
-                                    )
+                                    # For MP3 format, collect audio data for silence-based splitting
+                                    mp3_buffer.append(chunk)
                                     
-                                    # Convert the pytorch tensor to PCM data
-                                    chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
-                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
-                                    
-                                    # Send the PCM data to ffmpeg and get mp3 data
-                                    mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
-                                    
-                                    if process.returncode != 0:
-                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                        continue
-                                    
-                                    # Send the mp3 data
-                                    await websocket.send_bytes(mp3_data)
-                                else:  # opus
-                                    # Use FFmpeg to encode to opus
-                                    process = subprocess.Popen(
-                                        [
-                                            "ffmpeg",
-                                            "-f", "s16le",      # 16-bit PCM input
-                                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                            "-ac", "1",         # Mono
-                                            "-i", "pipe:0",     # Read from stdin
-                                            "-c:a", "libopus",
-                                            "-b:a", "32k",
-                                            "-application", "voip",
-                                            "-vbr", "on",
-                                            "-f", "opus",
-                                            "pipe:1"            # Output to stdout
-                                        ],
-                                        stdin=subprocess.PIPE,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE
-                                    )
-                                    
-                                    # Convert the pytorch tensor to PCM data
-                                    chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
-                                    chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
-                                    
-                                    # Send the PCM data to ffmpeg and get opus data
-                                    opus_data, stderr = process.communicate(input=chunk_pcm.tobytes())
-                                    
-                                    if process.returncode != 0:
-                                        print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                        continue
-                                    
-                                    # Send the opus data
-                                    await websocket.send_bytes(opus_data)
+                                    # Try to split based on silence
+                                    if len(mp3_buffer) > 1:  # Need at least some audio to analyze
+                                        # Combine chunks into one tensor for silence analysis
+                                        combined_audio = torch.cat([c.squeeze() for c in mp3_buffer], dim=0)
+                                        
+                                        # Convert to numpy array for processing
+                                        numpy_audio = combined_audio.cpu().numpy()
+                                        
+                                        # Convert to AudioSegment for silence detection (16-bit PCM)
+                                        pcm_audio = np.clip(numpy_audio, -1, 1)
+                                        pcm_audio = (pcm_audio * 32767).astype(np.int16)
+                                        
+                                        from pydub import AudioSegment
+                                        from pydub.silence import split_on_silence
+                                        
+                                        audio_segment = AudioSegment(
+                                            data=pcm_audio.tobytes(),
+                                            sample_width=2,  # 16-bit
+                                            frame_rate=24000,
+                                            channels=1
+                                        )
+                                        
+                                        # Split on silence using parameters from split_wav_into_mp3_based_on_silence.py
+                                        chunks = split_on_silence(
+                                            audio_segment,
+                                            min_silence_len=80,     # 80ms: Minimum silence to be considered a pause
+                                            silence_thresh=-28,     # -28 dBFS: Threshold for silence
+                                            keep_silence=60         # 60ms: Keep some silence for natural sound
+                                        )
+                                        
+                                        # If we found at least one valid split
+                                        if len(chunks) > 1:
+                                            # Convert the first chunk to MP3 and send it
+                                            first_chunk = chunks[0]
+                                            
+                                            # Export to MP3 in memory
+                                            mp3_io = io.BytesIO()
+                                            first_chunk.export(mp3_io, format="mp3", bitrate="128k", parameters=["-ac", "1"])
+                                            mp3_io.seek(0)
+                                            mp3_data = mp3_io.read()
+                                            
+                                            # Send the MP3 data
+                                            await websocket.send_bytes(mp3_data)
+                                            
+                                            # Remove the processed audio from the buffer
+                                            # Calculate how many samples we need to remove (first_chunk length in samples)
+                                            samples_to_remove = len(first_chunk) * 24000 // 1000  # Convert ms to samples
+                                            
+                                            # Skip removing if we don't have enough samples
+                                            if samples_to_remove > 0 and samples_to_remove < combined_audio.shape[0]:
+                                                # Create a new buffer with the remaining audio
+                                                remaining_samples = combined_audio[samples_to_remove:]
+                                                
+                                                # Clear the buffer and add remaining audio as a single chunk
+                                                mp3_buffer = [remaining_samples.unsqueeze(0)]
+                                    else:  # opus
+                                        # Use FFmpeg to encode to opus
+                                        process = subprocess.Popen(
+                                            [
+                                                "ffmpeg",
+                                                "-f", "s16le",      # 16-bit PCM input
+                                                "-ar", "24000",     # Sample rate - XTTS uses 24kHz
+                                                "-ac", "1",         # Mono
+                                                "-i", "pipe:0",     # Read from stdin
+                                                "-c:a", "libopus",
+                                                "-b:a", "32k",
+                                                "-application", "voip",
+                                                "-vbr", "on",
+                                                "-f", "opus",
+                                                "pipe:1"            # Output to stdout
+                                            ],
+                                            stdin=subprocess.PIPE,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE
+                                        )
+                                        
+                                        # Convert the pytorch tensor to PCM data
+                                        chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
+                                        chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                        
+                                        # Send the PCM data to ffmpeg and get opus data
+                                        opus_data, stderr = process.communicate(input=chunk_pcm.tobytes())
+                                        
+                                        if process.returncode != 0:
+                                            print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                            continue
+                                        
+                                        # Send the opus data
+                                        await websocket.send_bytes(opus_data)
                 
                 # Only combine and save audio files if saveAudioFile is True
                 if save_audio_file:
@@ -1628,11 +1915,7 @@ async def websocket_endpoint_streaming(websocket: WebSocket, api_key: Optional[s
                     
                     # Schedule WAV cleanup without waiting for it to complete
                     print("Starting cleanup process...")
-                    asyncio.create_task(
-                        async_clean_wav_files(
-                            exclude_patterns=[f"{timestamp}-*.{audio_format}", f"{timestamp}-full.{audio_format}"]
-                        )
-                    )
+                    asyncio.create_task(async_clean_wav_files())
                 except asyncio.TimeoutError:
                     print(f"Warning: Audio combination timed out for {full_audio_path}")
                 except Exception as e:
@@ -1918,7 +2201,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 stream_chunk_size = 10  # Larger chunks for better continuity
                 overlap_wav_len = 3072  # Overlap for smoother transitions
                 
-                print(f"Using stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len}, speed={speed}")
+                print(f"Using stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len}")
                 
                 first_chunk = True
                 first_chunk_time = 0
@@ -1926,6 +2209,12 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 
                 # For raw format, we'll collect all audio chunks in memory before converting to MP3
                 raw_buffer = []
+                
+                # For MP3 format, we'll collect all audio chunks in this buffer before silence-based splitting
+                mp3_buffer = []
+                
+                # Initialize combine_task to None to avoid reference errors
+                combine_task = None
                 
                 # Process each text segment
                 for segment_idx, segment in enumerate(text_segments):
@@ -2000,36 +2289,93 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                         # Send WAV data - first response goes out immediately
                                         await websocket.send_bytes(wav_data)
                                     elif audio_format == "mp3":
-                                        # Create in-memory MP3 file using FFmpeg
-                                        process = subprocess.Popen(
-                                            [
-                                                "ffmpeg",
-                                                "-f", "s16le",      # 16-bit PCM input
-                                                "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                                "-ac", "1",         # Mono
-                                                "-i", "pipe:0",     # Read from stdin
-                                                "-c:a", "libmp3lame",
-                                                "-b:a", "128k",     # MP3 bitrate
-                                                "-f", "mp3",
-                                                "pipe:1"            # Output to stdout
-                                            ],
-                                            stdin=subprocess.PIPE,
-                                            stdout=subprocess.PIPE,
-                                            stderr=subprocess.PIPE
-                                        )
+                                        # For MP3 format, collect audio data for silence-based splitting
+                                        print(f"MP3 format: Adding first chunk to buffer for silence-based splitting")
+                                        mp3_buffer.append(first_audio_chunk)
                                         
-                                        # Convert the pytorch tensor to PCM data
-                                        chunk_pcm = np.clip(first_audio_chunk.squeeze().cpu().numpy(), -1, 1)
-                                        chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
-                                        
-                                        # Send the PCM data to ffmpeg and get mp3 data
-                                        mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
-                                        
-                                        if process.returncode != 0:
-                                            print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
+                                        # Try to split based on silence
+                                        if len(mp3_buffer) > 1:  # Need at least some audio to analyze
+                                            print(f"MP3 buffer has {len(mp3_buffer)} chunks, attempting silence-based splitting")
+                                            
+                                            # Combine chunks into one tensor for silence analysis
+                                            print("Combining audio chunks into single tensor for analysis")
+                                            combined_audio = torch.cat([c.squeeze() for c in mp3_buffer], dim=0)
+                                            print(f"Combined audio shape: {combined_audio.shape}")
+                                            
+                                            # Convert to numpy array for processing
+                                            print("Converting tensor to numpy array")
+                                            numpy_audio = combined_audio.cpu().numpy()
+                                            print(f"Numpy audio shape: {numpy_audio.shape}, dtype: {numpy_audio.dtype}")
+                                            
+                                            # Convert to AudioSegment for silence detection (16-bit PCM)
+                                            print("Converting to 16-bit PCM for silence detection")
+                                            pcm_audio = np.clip(numpy_audio, -1, 1)
+                                            pcm_audio = (pcm_audio * 32767).astype(np.int16)
+                                            print(f"PCM audio shape: {pcm_audio.shape}, dtype: {pcm_audio.dtype}")
+                                            
+                                            from pydub import AudioSegment
+                                            from pydub.silence import split_on_silence
+                                            
+                                            print("Creating AudioSegment object for silence detection")
+                                            audio_segment = AudioSegment(
+                                                data=pcm_audio.tobytes(),
+                                                sample_width=2,  # 16-bit
+                                                frame_rate=24000,
+                                                channels=1
+                                            )
+                                            print(f"AudioSegment created: {len(audio_segment)}ms duration")
+                                            
+                                            # Split on silence using parameters from split_wav_into_mp3_based_on_silence.py
+                                            print("Splitting audio on silence with parameters: min_silence_len=80ms, silence_thresh=-28dBFS, keep_silence=60ms")
+                                            chunks = split_on_silence(
+                                                audio_segment,
+                                                min_silence_len=80,     # 80ms: Minimum silence to be considered a pause
+                                                silence_thresh=-28,     # -28 dBFS: Threshold for silence
+                                                keep_silence=60         # 60ms: Keep some silence for natural sound
+                                            )
+                                            print(f"Split result: {len(chunks)} audio chunks detected")
+                                            
+                                            # If we found at least one valid split
+                                            if len(chunks) > 1:
+                                                print(f"Multiple chunks detected, processing first chunk of {len(chunks[0])}ms")
+                                                # Convert the first chunk to MP3 and send it
+                                                first_chunk = chunks[0]
+                                                
+                                                # Export to MP3 in memory
+                                                print("Exporting first chunk to MP3 format in memory")
+                                                mp3_io = io.BytesIO()
+                                                first_chunk.export(mp3_io, format="mp3", bitrate="128k", parameters=["-ac", "1"])
+                                                mp3_io.seek(0)
+                                                mp3_data = mp3_io.read()
+                                                print(f"MP3 data size: {len(mp3_data)} bytes")
+                                                
+                                                # Send the MP3 data
+                                                print("Sending MP3 data to client")
+                                                await websocket.send_bytes(mp3_data)
+                                                print("MP3 data sent successfully")
+                                                
+                                                # Remove the processed audio from the buffer
+                                                # Calculate how many samples we need to remove (first_chunk length in samples)
+                                                samples_to_remove = len(first_chunk) * 24000 // 1000  # Convert ms to samples
+                                                print(f"Calculating samples to remove: {samples_to_remove} samples ({len(first_chunk)}ms)")
+                                                
+                                                # Skip removing if we don't have enough samples
+                                                if samples_to_remove > 0 and samples_to_remove < combined_audio.shape[0]:
+                                                    print(f"Removing {samples_to_remove} samples from buffer")
+                                                    # Create a new buffer with the remaining audio
+                                                    remaining_samples = combined_audio[samples_to_remove:]
+                                                    print(f"Remaining samples shape: {remaining_samples.shape}")
+                                                    
+                                                    # Clear the buffer and add remaining audio as a single chunk
+                                                    print("Updating MP3 buffer with remaining audio")
+                                                    mp3_buffer = [remaining_samples.unsqueeze(0)]
+                                                    print(f"Updated MP3 buffer has {len(mp3_buffer)} chunks")
+                                                else:
+                                                    print(f"Cannot remove samples: samples_to_remove={samples_to_remove}, combined_audio.shape={combined_audio.shape}")
+                                            else:
+                                                print(f"No valid splits found, keeping audio in buffer for next iteration")
                                         else:
-                                            # Send the mp3 data - first response goes out immediately
-                                            await websocket.send_bytes(mp3_data)
+                                            print(f"MP3 buffer has only {len(mp3_buffer)} chunk(s), need more for analysis")
                                     else:  # opus
                                         # Use FFmpeg to encode to opus
                                         process = subprocess.Popen(
@@ -2060,119 +2406,10 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                         
                                         if process.returncode != 0:
                                             print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                        else:
-                                            # Send the opus data - first response goes out immediately
-                                            await websocket.send_bytes(opus_data)
-                            
-                            # Now process remaining chunks for first segment
-                            for chunk in stream_chunks_iterator:
-                                chunk_counter += 1
-                                
-                                # Only save the chunk to a file if saveAudioFile is True
-                                if save_audio_file:
-                                    # If audioFormat is raw, use .raw extension instead of .mp3
-                                    if audio_format == "raw":
-                                        chunk_filename = f"outputs/{timestamp}-{chunk_counter}.raw"
-                                    else:
-                                        chunk_filename = f"outputs/{timestamp}-{chunk_counter}.{audio_format}"
-                                    
-                                    chunk_files.append(chunk_filename)
-                                    
-                                    # Start a task to save the chunk in the background
-                                    asyncio.create_task(
-                                        save_audio_chunk_background(chunk, chunk_filename, audio_format)
-                                    )
-                                
-                                # Keep track of all chunks for later combining if needed
-                                if save_audio_file or audio_format == "raw":
-                                    all_chunks.append(chunk)
-                                
-                                # For "raw" format, collect audio chunks but don't send yet
-                                if audio_format == "raw":
-                                    # Add to raw buffer without conversion
-                                    raw_buffer.append(chunk)
-                                else:
-                                    # Stream the chunk to the client with high quality
-                                    if isinstance(chunk, torch.Tensor):
-                                        # Prepare tensor for streaming
-                                        chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
+                                            continue
                                         
-                                        # Stream in the requested format
-                                        if audio_format == "wav":
-                                            # Create in-memory WAV file
-                                            wav_buffer = io.BytesIO()
-                                            torchaudio.save(wav_buffer, chunk_audio, 24000, format="wav")
-                                            wav_buffer.seek(0)
-                                            wav_data = wav_buffer.read()
-                                            
-                                            # Send WAV data
-                                            await websocket.send_bytes(wav_data)
-                                        elif audio_format == "mp3":
-                                            # Create in-memory MP3 file using FFmpeg
-                                            process = subprocess.Popen(
-                                                [
-                                                    "ffmpeg",
-                                                    "-f", "s16le",      # 16-bit PCM input
-                                                    "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                                    "-ac", "1",         # Mono
-                                                    "-i", "pipe:0",     # Read from stdin
-                                                    "-c:a", "libmp3lame",
-                                                    "-b:a", "128k",     # MP3 bitrate
-                                                    "-f", "mp3",
-                                                    "pipe:1"            # Output to stdout
-                                                ],
-                                                stdin=subprocess.PIPE,
-                                                stdout=subprocess.PIPE,
-                                                stderr=subprocess.PIPE
-                                            )
-                                            
-                                            # Convert the pytorch tensor to PCM data
-                                            chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
-                                            chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
-                                            
-                                            # Send the PCM data to ffmpeg and get mp3 data
-                                            mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
-                                            
-                                            if process.returncode != 0:
-                                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                                continue
-                                            
-                                            # Send the mp3 data
-                                            await websocket.send_bytes(mp3_data)
-                                        else:  # opus
-                                            # Use FFmpeg to encode to opus
-                                            process = subprocess.Popen(
-                                                [
-                                                    "ffmpeg",
-                                                    "-f", "s16le",      # 16-bit PCM input
-                                                    "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                                    "-ac", "1",         # Mono
-                                                    "-i", "pipe:0",     # Read from stdin
-                                                    "-c:a", "libopus",
-                                                    "-b:a", "32k",
-                                                    "-application", "voip",
-                                                    "-vbr", "on",
-                                                    "-f", "opus",
-                                                    "pipe:1"            # Output to stdout
-                                                ],
-                                                stdin=subprocess.PIPE,
-                                                stdout=subprocess.PIPE,
-                                                stderr=subprocess.PIPE
-                                            )
-                                            
-                                            # Convert the pytorch tensor to PCM data
-                                            chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
-                                            chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
-                                            
-                                            # Send the PCM data to ffmpeg and get opus data
-                                            opus_data, stderr = process.communicate(input=chunk_pcm.tobytes())
-                                            
-                                            if process.returncode != 0:
-                                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                                continue
-                                            
-                                            # Send the opus data
-                                            await websocket.send_bytes(opus_data)
+                                        # Send the opus data
+                                        await websocket.send_bytes(opus_data)
                         except StopIteration:
                             # Handle case where iterator has no chunks
                             print(f"No chunks generated for first segment: {segment}")
@@ -2201,58 +2438,80 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                             if save_audio_file or audio_format == "raw":
                                 all_chunks.append(chunk)
                             
-                            # For "raw" format, collect audio chunks but don't send yet
-                            if audio_format == "raw":
-                                # Add to raw buffer without conversion
-                                raw_buffer.append(chunk)
-                            else:
-                                # Stream the chunk to the client with high quality
-                                if isinstance(chunk, torch.Tensor):
-                                    # Prepare tensor for streaming
-                                    chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
+                            # Stream the chunk to the client with high quality
+                            if isinstance(chunk, torch.Tensor):
+                                # Prepare tensor for streaming
+                                chunk_audio = chunk.squeeze().unsqueeze(0).cpu()
+                                
+                                # Stream in the requested format
+                                if audio_format == "wav":
+                                    # Create in-memory WAV file
+                                    wav_buffer = io.BytesIO()
+                                    torchaudio.save(wav_buffer, chunk_audio, 24000, format="wav")
+                                    wav_buffer.seek(0)
+                                    wav_data = wav_buffer.read()
                                     
-                                    # Stream in the requested format
-                                    if audio_format == "wav":
-                                        # Create in-memory WAV file
-                                        wav_buffer = io.BytesIO()
-                                        torchaudio.save(wav_buffer, chunk_audio, 24000, format="wav")
-                                        wav_buffer.seek(0)
-                                        wav_data = wav_buffer.read()
+                                    # Send WAV data
+                                    await websocket.send_bytes(wav_data)
+                                elif audio_format == "mp3":
+                                    # For MP3 format, collect audio data for silence-based splitting
+                                    mp3_buffer.append(chunk)
+                                    
+                                    # Try to split based on silence
+                                    if len(mp3_buffer) > 1:  # Need at least some audio to analyze
+                                        # Combine chunks into one tensor for silence analysis
+                                        combined_audio = torch.cat([c.squeeze() for c in mp3_buffer], dim=0)
                                         
-                                        # Send WAV data
-                                        await websocket.send_bytes(wav_data)
-                                    elif audio_format == "mp3":
-                                        # Create in-memory MP3 file using FFmpeg
-                                        process = subprocess.Popen(
-                                            [
-                                                "ffmpeg",
-                                                "-f", "s16le",      # 16-bit PCM input
-                                                "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                                                "-ac", "1",         # Mono
-                                                "-i", "pipe:0",     # Read from stdin
-                                                "-c:a", "libmp3lame",
-                                                "-b:a", "128k",     # MP3 bitrate
-                                                "-f", "mp3",
-                                                "pipe:1"            # Output to stdout
-                                            ],
-                                            stdin=subprocess.PIPE,
-                                            stdout=subprocess.PIPE,
-                                            stderr=subprocess.PIPE
+                                        # Convert to numpy array for processing
+                                        numpy_audio = combined_audio.cpu().numpy()
+                                        
+                                        # Convert to AudioSegment for silence detection (16-bit PCM)
+                                        pcm_audio = np.clip(numpy_audio, -1, 1)
+                                        pcm_audio = (pcm_audio * 32767).astype(np.int16)
+                                        
+                                        from pydub import AudioSegment
+                                        from pydub.silence import split_on_silence
+                                        
+                                        audio_segment = AudioSegment(
+                                            data=pcm_audio.tobytes(),
+                                            sample_width=2,  # 16-bit
+                                            frame_rate=24000,
+                                            channels=1
                                         )
                                         
-                                        # Convert the pytorch tensor to PCM data
-                                        chunk_pcm = np.clip(chunk.squeeze().cpu().numpy(), -1, 1)
-                                        chunk_pcm = (chunk_pcm * 32767).astype(np.int16)
+                                        # Split on silence using parameters from split_wav_into_mp3_based_on_silence.py
+                                        chunks = split_on_silence(
+                                            audio_segment,
+                                            min_silence_len=80,     # 80ms: Minimum silence to be considered a pause
+                                            silence_thresh=-28,     # -28 dBFS: Threshold for silence
+                                            keep_silence=60         # 60ms: Keep some silence for natural sound
+                                        )
                                         
-                                        # Send the PCM data to ffmpeg and get mp3 data
-                                        mp3_data, stderr = process.communicate(input=chunk_pcm.tobytes())
-                                        
-                                        if process.returncode != 0:
-                                            print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                            continue
-                                        
-                                        # Send the mp3 data
-                                        await websocket.send_bytes(mp3_data)
+                                        # If we found at least one valid split
+                                        if len(chunks) > 1:
+                                            # Convert the first chunk to MP3 and send it
+                                            first_chunk = chunks[0]
+                                            
+                                            # Export to MP3 in memory
+                                            mp3_io = io.BytesIO()
+                                            first_chunk.export(mp3_io, format="mp3", bitrate="128k", parameters=["-ac", "1"])
+                                            mp3_io.seek(0)
+                                            mp3_data = mp3_io.read()
+                                            
+                                            # Send the MP3 data
+                                            await websocket.send_bytes(mp3_data)
+                                            
+                                            # Remove the processed audio from the buffer
+                                            # Calculate how many samples we need to remove (first_chunk length in samples)
+                                            samples_to_remove = len(first_chunk) * 24000 // 1000  # Convert ms to samples
+                                            
+                                            # Skip removing if we don't have enough samples
+                                            if samples_to_remove > 0 and samples_to_remove < combined_audio.shape[0]:
+                                                # Create a new buffer with the remaining audio
+                                                remaining_samples = combined_audio[samples_to_remove:]
+                                                
+                                                # Clear the buffer and add remaining audio as a single chunk
+                                                mp3_buffer = [remaining_samples.unsqueeze(0)]
                                     else:  # opus
                                         # Use FFmpeg to encode to opus
                                         process = subprocess.Popen(
@@ -2287,68 +2546,6 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                         
                                         # Send the opus data
                                         await websocket.send_bytes(opus_data)
-                
-                # If "raw" format, now process the collected audio chunks
-                if audio_format == "raw" and raw_buffer:
-                    print(f"Processing collected chunks in 'raw' format, converting to MP3...")
-                    
-                    # Combine all chunks into one tensor
-                    all_audio = torch.cat([chunk.squeeze() for chunk in raw_buffer], dim=0)
-                    
-                    # Convert to numpy array
-                    combined_audio = all_audio.cpu().numpy()
-                    
-                    # Create high-quality MP3 from combined audio
-                    # Set up FFmpeg with optimized MP3 settings based on the reference info
-                    process = subprocess.Popen(
-                        [
-                            "ffmpeg",
-                            "-f", "s16le",      # 16-bit PCM input
-                            "-ar", "24000",     # Sample rate - XTTS uses 24kHz
-                            "-ac", "1",         # Mono
-                            "-i", "pipe:0",     # Read from stdin
-                            "-c:a", "libmp3lame",
-                            "-b:a", "128k",     # MP3 bitrate (can be adjusted)
-                            "-q:a", "2",        # Quality setting - lower is better
-                            "-joint_stereo", "0", # Follow MP3 standard for better compatibility
-                            "-f", "mp3",
-                            "pipe:1"            # Output to stdout
-                        ],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE
-                    )
-                    
-                    # Convert the combined audio to PCM data
-                    combined_pcm = np.clip(combined_audio, -1, 1)
-                    combined_pcm = (combined_pcm * 32767).astype(np.int16)
-                    
-                    # Send the PCM data to ffmpeg and get mp3 data
-                    mp3_data, stderr = process.communicate(input=combined_pcm.tobytes())
-                    
-                    if process.returncode != 0:
-                        print(f"FFmpeg error during combined MP3 creation: {stderr.decode('utf-8', errors='ignore')}")
-                        error = ERROR_CODES["TTS_GENERATION_ERROR"]
-                        await websocket.send_json({
-                            "errorCode": error["errorCode"],
-                            "message": f"{error['message']}: Failed to create MP3 from collected audio chunks"
-                        })
-                    else:
-                        # Send the complete MP3 data
-                        await websocket.send_bytes(mp3_data)
-                        print(f"Sent combined MP3 data ({len(mp3_data)} bytes) to client")
-                
-                # Print parameter values before cleanup starts
-                print(f"Parameters used - language: {language}, audioFormat: {audio_format}, saveAudioFile: {save_audio_file}, saveLog: {save_log}, speed: {speed}, speakerId: {speaker_id}, reference_audio: {reference_audio}")
-                
-                # Send an empty chunk to signal completion
-                await websocket.send_bytes(b'')
-                
-                # Send "EOT" text message to signal end of transmission
-                # await websocket.send_text("EOT")
-                
-                # Initialize combine_task to None to avoid reference errors
-                combine_task = None
                 
                 # Only combine and save audio files if saveAudioFile is True
                 if save_audio_file:
@@ -2426,11 +2623,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     
                     # Schedule WAV cleanup without waiting for it to complete
                     print("Starting cleanup process...")
-                    asyncio.create_task(
-                        async_clean_wav_files(
-                            exclude_patterns=[f"{timestamp}-*.{audio_format}", f"{timestamp}-full.{audio_format}"]
-                        )
-                    )
+                    asyncio.create_task(async_clean_wav_files())
                 except asyncio.TimeoutError:
                     print(f"Warning: Audio combination timed out for {full_audio_path}")
                 except Exception as e:
@@ -2443,16 +2636,11 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     print("Starting cleanup process...")
                     asyncio.create_task(async_clean_wav_files())
                 
-                # Where the full audio file is created/saved
-                if save_audio_file and raw_buffer:
-                    # For raw format, save the full combined file with the correct extension
-                    if audio_format == "raw":
-                        full_audio_path = f"outputs/{timestamp}-full.raw"
-                        
-                        # Create a task to combine and save the full audio
-                        asyncio.create_task(
-                            combine_audio_chunks_background(chunk_files, full_audio_path, "raw")
-                        )
+                # Send an empty chunk to signal completion
+                await websocket.send_bytes(b'')
+                
+                # Send "EOT" text message to signal end of transmission
+                #await websocket.send_text("EOT")
                 
             except Exception as e:
                 print(f"Error generating audio: {e}")
@@ -2468,1083 +2656,6 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
             await websocket.close()
         except:
             pass
-
-# Helper function to save audio chunk from pytorch tensor
-async def save_audio_chunk_background(chunk, chunk_path, audio_format):
-    try:
-        print(f"Saving audio chunk to {chunk_path}")
-        
-        # Convert PyTorch tensor to proper format for saving
-        if isinstance(chunk, torch.Tensor):
-            # Move to CPU and ensure it's the right shape
-            chunk_audio = chunk.squeeze().cpu().numpy()
-            
-            if audio_format == "raw":
-                # Save raw PCM data directly
-                chunk_audio = np.clip(chunk_audio, -1, 1)
-                chunk_audio = (chunk_audio * 32767).astype(np.int16)
-                
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(chunk_path), exist_ok=True)
-                
-                # Write raw PCM data to file
-                with open(chunk_path, 'wb') as f:
-                    f.write(chunk_audio.tobytes())
-                print(f"Saved RAW audio chunk to {chunk_path}")
-            elif audio_format == "wav":
-                # Save WAV file directly using scipy.io.wavfile
-                # Normalize and convert to 16-bit PCM
-                chunk_audio = np.clip(chunk_audio, -1, 1)
-                chunk_audio = (chunk_audio * 32767).astype(np.int16)
-                wavfile.write(chunk_path, 24000, chunk_audio)
-                print(f"Saved WAV audio chunk")
-            elif audio_format == "opus":
-                # Use the same FFmpeg approach as in /tts endpoint
-                # Normalize and convert to 16-bit PCM
-                chunk_audio = np.clip(chunk_audio, -1, 1)
-                chunk_audio = (chunk_audio * 32767).astype(np.int16)
-                
-                # Save as WAV first
-                temp_wav_path = chunk_path.replace(".opus", ".temp.wav")
-                wavfile.write(temp_wav_path, 24000, chunk_audio)
-                
-                # Convert to opus using identical FFmpeg parameters as /tts
-                subprocess.run([
-                    "ffmpeg",
-                    "-i", temp_wav_path,
-                    "-c:a", "libopus",
-                    "-b:a", "32k",
-                    "-application", "voip",
-                    "-vbr", "on",
-                    chunk_path,
-                    "-y"  # Overwrite if exists
-                ], check=False, capture_output=True)
-                
-                # Remove temporary WAV file
-                try:
-                    os.remove(temp_wav_path)
-                except:
-                    pass
-                    
-                print(f"Saved Opus audio chunk using same method as /tts")
-            elif audio_format == "mp3":
-                # Use FFmpeg to encode to MP3
-                # Save as WAV first
-                temp_wav_path = chunk_path.replace(".mp3", ".temp.wav")
-                wavfile.write(temp_wav_path, 24000, chunk_audio)
-                
-                # Convert to MP3 using FFmpeg
-                subprocess.run([
-                    "ffmpeg",
-                    "-i", temp_wav_path,
-                    "-c:a", "libmp3lame",
-                    "-b:a", "128k",
-                    chunk_path,
-                    "-y"  # Overwrite if exists
-                ], check=False, capture_output=True)
-                
-                # Remove temporary WAV file
-                try:
-                    os.remove(temp_wav_path)
-                except:
-                    pass
-                
-                print(f"Saved MP3 audio chunk")
-        else:
-            print(f"Error: chunk is not a tensor, got {type(chunk)}")
-    except Exception as e:
-        print(f"Error saving audio chunk: {e}")
-
-# Helper function to combine audio chunks
-async def combine_audio_chunks_background(chunk_files, full_audio_path, audio_format):
-    try:
-        print(f"Combining {len(chunk_files)} audio chunks into {full_audio_path}")
-        
-        if audio_format == "raw":
-            # For raw format, concatenate the binary files
-            with open(full_audio_path, 'wb') as outfile:
-                for chunk_file in chunk_files:
-                    if os.path.exists(chunk_file):
-                        with open(chunk_file, 'rb') as infile:
-                            outfile.write(infile.read())
-            print(f"Combined RAW audio chunks into {full_audio_path}")
-        # Existing code for other formats...
-    except Exception as e:
-        print(f"Error combining audio segments: {e}")
-        # Fallback to original basic method if everything else fails
-        try:
-            # Create a concat file for ffmpeg
-            concat_file = full_audio_path + ".txt"
-            with open(concat_file, 'w') as f:
-                for segment in valid_segment_files:
-                    f.write(f"file '{os.path.abspath(segment)}'\n")
-            
-            # Use ffmpeg to concatenate files
-            subprocess.run([
-                "ffmpeg",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", concat_file,
-                "-c", "copy",
-                full_audio_path,
-                "-y"
-            ], check=False, capture_output=True)
-            
-            # Remove concat file
-            os.remove(concat_file)
-        except Exception as inner_e:
-            print(f"Fallback concatenation also failed: {inner_e}")
-
-# Update the TTSRequest model to include language parameter
-class TTSRequest(BaseModel):
-    text: str
-    language: Optional[str] = "en"
-    audioFormat: Optional[str] = "opus"  # Default to opus, can be wav or opus
-
-# Helper function to convert wav to opus using FFmpeg
-def convert_wav_to_opus(wav_path, opus_path):
-    try:
-        # Use FFmpeg to convert WAV to Opus
-        subprocess.run(
-            [
-                "ffmpeg", 
-                "-i", wav_path,
-                "-c:a", "libopus",
-                "-b:a", "32k",
-                "-application", "voip",
-                "-vbr", "on",
-                opus_path,
-                "-y"  # Overwrite if exists
-            ],
-            check=True,
-            capture_output=True
-        )
-        return True
-    except Exception as e:
-        print(f"Error converting WAV to Opus: {e}")
-        return False
-
-# Update the /tts endpoint to properly handle single-dimensional arrays
-@app.post("/tts")
-async def generate_audio_http(
-    request: TTSRequest,
-    api_key: APIKey = Depends(get_api_key)
-):
-    overall_start = time.time()
-    validation_start = time.time()
-    try:
-        # Log usage for the API key
-        print(f"API request from user: {API_KEYS[api_key]['user']}")
-        
-        text = request.text
-        language = request.language.lower() if request.language else "en"
-        audio_format = request.audioFormat.lower() if request.audioFormat else "opus"
-        
-        # Validate audio format
-        if audio_format not in ["wav", "opus", "mp3"]:
-            error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
-            return {"errorCode": error["errorCode"], "message": error["message"]}
-        
-        if text.startswith('[') and text.endswith(']'):
-            text = text.strip('[]').strip('"\'')
-            
-        print(f"Processing text: {text} with language: {language}, format: {audio_format}")
-        
-        # Validate language
-        if language != "en" and language not in SUPPORTED_LANGUAGES:
-            error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
-            return {"errorCode": error["errorCode"], "message": f"{error['message']}: {language}"}
-        
-        # Check for language mismatch
-        detected_lang = detect_language(text)
-        if detected_lang and language == "en" and detected_lang != "en":
-            detected_lang_name = SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)
-            error = ERROR_CODES["LANGUAGE_MISMATCH"]
-            return {"errorCode": error["errorCode"], "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"}
-        
-        validation_time = time.time() - validation_start
-        print(f"DEBUG: Validation time: {validation_time * 1000:.2f} ms")
-        
-        timestamp = int(time.time())
-        
-        # Generate audio directly in memory
-        tts_start = time.time()
-        if language == "en":
-            print("Using FastPitch model for English text inference")
-            with torch.inference_mode():
-                wav = global_tts.tts(text=text)
-        else:
-            print(f"Using XTTS v2 model for {language} language inference")
-            
-            if not os.path.exists(sample_wav_path):
-                error = ERROR_CODES["REFERENCE_AUDIO_NOT_FOUND"]
-                return {"errorCode": error["errorCode"], "message": error["message"]}
-                
-            with torch.inference_mode():
-                wav = global_chinese_tts.tts(
-                    text=text,
-                    speaker_wav=sample_wav_path,
-                    language=language
-                )
-        
-        tts_time = time.time() - tts_start
-        print(f"DEBUG: TTS generation time: {tts_time * 1000:.2f} ms")
-        
-        # Normalize and convert to 16-bit PCM
-        normalize_start = time.time()
-        wav = np.clip(wav, -1, 1)
-        wav = (wav * 32767).astype(np.int16)
-        normalize_time = time.time() - normalize_start
-        print(f"DEBUG: Normalization time: {normalize_time * 1000:.2f} ms")
-        
-        # Create file paths for saving audio in the background
-        wav_path = f"outputs/tts_output_{timestamp}.wav"
-        opus_path = f"outputs/tts_output_{timestamp}.opus"
-        
-        # Start a background task to save the audio file
-        # This won't block the response to the client
-        asyncio.create_task(
-            save_audio_file_background(wav.copy(), wav_path, opus_path, audio_format)
-        )
-        
-        # Start a background task for cleanup - don't wait for it
-        cleanup_start = time.time()
-        asyncio.create_task(async_clean_wav_files())
-        cleanup_time = time.time() - cleanup_start
-        print(f"DEBUG: Cleanup task creation time: {cleanup_time * 1000:.2f} ms")
-        
-        # Prepare response with minimal latency
-        format_start = time.time()
-        if audio_format == "wav":
-            # Create WAV file in memory
-            wav_io_start = time.time()
-            wav_io = io.BytesIO()
-            wavfile.write(wav_io, 22050, wav)
-            wav_io.seek(0)
-            wav_io_time = time.time() - wav_io_start
-            print(f"DEBUG: WAV in-memory conversion time: {wav_io_time * 1000:.2f} ms")
-            
-            response_start = time.time()
-            response = StreamingResponse(
-                wav_io,
-                media_type="audio/wav",
-                headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.wav"}
-            )
-            response_time = time.time() - response_start
-            print(f"DEBUG: StreamingResponse creation time (WAV): {response_time * 1000:.2f} ms")
-            
-        elif audio_format == "opus":
-            # Start FFmpeg process
-            ffmpeg_start = time.time()
-            process = subprocess.Popen(
-                [
-                    "ffmpeg",
-                    "-f", "s16le",      # 16-bit PCM input
-                    "-ar", "22050",     # Sample rate
-                    "-ac", "1",         # Mono
-                    "-i", "pipe:0",     # Read from stdin
-                    "-c:a", "libopus",
-                    "-b:a", "32k",
-                    "-application", "voip",
-                    "-vbr", "on",
-                    "-f", "opus",
-                    "pipe:1"            # Output to stdout
-                ],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            
-            # Send wav data to ffmpeg and get opus data
-            opus_data, stderr = process.communicate(input=wav.tobytes())
-            ffmpeg_time = time.time() - ffmpeg_start
-            print(f"DEBUG: FFmpeg opus conversion time: {ffmpeg_time * 1000:.2f} ms")
-            
-            if process.returncode != 0:
-                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                error = ERROR_CODES["TTS_GENERATION_ERROR"]
-                return {"errorCode": error["errorCode"], "message": f"{error['message']}: FFmpeg encoding failed"}
-            
-            response_start = time.time()
-            response = StreamingResponse(
-                io.BytesIO(opus_data),
-                media_type="audio/opus",
-                headers={"Content-Disposition": f"attachment; filename=tts_output_{timestamp}.opus"}
-            )
-            response_time = time.time() - response_start
-            print(f"DEBUG: StreamingResponse creation time (Opus): {response_time * 1000:.2f} ms")
-        
-        format_time = time.time() - format_start
-        print(f"DEBUG: Total format conversion time: {format_time * 1000:.2f} ms")
-        
-        total_time = time.time() - overall_start
-        print(f"DEBUG: Total endpoint processing time: {total_time * 1000:.2f} ms")
-        print(f"DEBUG: Time until response ready: {total_time * 1000:.2f} ms")
-        print(f"DEBUG: Audio file will be saved to {wav_path if audio_format == 'wav' else opus_path} in background")
-        
-        return response
-            
-    except Exception as e:
-        error_time = time.time() - overall_start
-        print(f"DEBUG: Error occurred after {error_time * 1000:.2f} ms")
-        print(f"TTS Error: {str(e)}")
-        error = ERROR_CODES["TTS_GENERATION_ERROR"]
-        return {"errorCode": error["errorCode"], "message": error["message"], "details": str(e)}
-
-# Update the ensure_numpy_array function to handle numpy.int16 and other scalar types
-def ensure_numpy_array(audio_array):
-    # Handle numpy scalar types (like numpy.int16)
-    if isinstance(audio_array, np.number):
-        return np.array([float(audio_array)])
-    
-    # Handle integer or scalar value case
-    if isinstance(audio_array, (int, float)) or (isinstance(audio_array, np.ndarray) and audio_array.shape == ()):
-        return np.array([float(audio_array)])
-    
-    if isinstance(audio_array, list):
-        if len(audio_array) == 0:  # Empty list
-            return np.array([])
-        elif len(audio_array) == 1:
-            # If the single element is a scalar, convert it properly
-            if isinstance(audio_array[0], (int, float, np.number)):
-                return np.array([float(audio_array[0])])
-            return audio_array[0]
-        else:
-            # Check if any array is zero-dimensional or scalar
-            for i, arr in enumerate(audio_array):
-                if isinstance(arr, (int, float, np.number)) or (isinstance(arr, np.ndarray) and (not arr.shape or arr.size == 0)):
-                    # Convert scalar/zero-dimensional arrays to 1D arrays
-                    audio_array[i] = np.array([float(arr)]) if isinstance(arr, (int, float, np.number)) else np.array([])
-            
-            # Filter out empty arrays
-            non_empty_arrays = [arr for arr in audio_array if hasattr(arr, 'size') and arr.size > 0]
-            
-            if not non_empty_arrays:
-                return np.array([])
-            elif len(non_empty_arrays) == 1:
-                return non_empty_arrays[0]
-            else:
-                try:
-                    return np.concatenate(non_empty_arrays)
-                except ValueError as e:
-                    # If concatenation fails, return the first non-empty array
-                    print(f"Warning: Could not concatenate arrays: {e}, returning first array")
-                    return non_empty_arrays[0]
-    
-    # If audio_array is not a numpy array or doesn't have shape attribute
-    if not isinstance(audio_array, np.ndarray):
-        try:
-            # Try to convert to numpy array
-            return np.array(audio_array, dtype=float)
-        except Exception as e:
-            print(f"Error converting to numpy array: {e}")
-            # Return a default empty audio array as fallback
-            return np.array([0.0], dtype=float)
-    
-    return audio_array
-
-# Helper function to save audio files in the background
-async def save_audio_file_background(wav_array, wav_path, opus_path, audio_format):
-    try:
-        print(f"Saving audio to {wav_path}, type: {type(wav_array)}")
-        
-        # Save WAV file directly using wavfile.write which expects int16 data
-        # The wav_array should already be properly normalized and converted to int16
-        sample_rate = 22050
-        wavfile.write(wav_path, sample_rate, wav_array)
-        
-        # If opus format, convert WAV to Opus using FFmpeg directly
-        if audio_format == "opus":
-            # Use FFmpeg to convert WAV to Opus with clean settings
-            subprocess.run(
-                [
-                    "ffmpeg", 
-                    "-i", wav_path,
-                    "-c:a", "libopus",
-                    "-b:a", "32k",
-                    "-application", "voip",
-                    "-vbr", "on",
-                    opus_path,
-                    "-y"  # Overwrite if exists
-                ],
-                check=True,
-                capture_output=True
-            )
-            
-            # Delete the temporary WAV file
-            if os.path.exists(wav_path):
-                os.remove(wav_path)
-                
-        print(f"Successfully saved audio file to {wav_path if audio_format == 'wav' else opus_path}")
-    except Exception as e:
-        print(f"Error saving audio file: {e}")
-
-# Update the HTTP stream endpoint
-@app.post("/tts-http-stream")
-async def generate_audio_http_stream(
-    request: TTSRequest,
-    api_key: APIKey = Depends(get_api_key)
-):
-    try:
-        # Log usage for the API key
-        print(f"API request from user: {API_KEYS[api_key]['user']}")
-        
-        text = request.text
-        language = request.language.lower() if request.language else "en"
-        audio_format = request.audioFormat.lower() if request.audioFormat else "opus"
-        
-        # Validate audio format
-        if audio_format not in ["wav", "opus", "mp3"]:
-            error = ERROR_CODES["INVALID_AUDIO_FORMAT"]
-            return JSONResponse(
-                status_code=400,
-                content={"errorCode": error["errorCode"], "message": error["message"]}
-            )
-        
-        if text.startswith('[') and text.endswith(']'):
-            text = text.strip('[]').strip('"\'')
-            
-        print(f"Processing text: {text} with language: {language}, format: {audio_format}")
-        
-        # Validate language
-        if language != "en" and language not in SUPPORTED_LANGUAGES:
-            error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
-            return JSONResponse(
-                status_code=400,
-                content={"errorCode": error["errorCode"], "message": f"{error['message']}: {language}"}
-            )
-            
-        # Check for language mismatch
-        detected_lang = detect_language(text)
-        if detected_lang and language == "en" and detected_lang != "en":
-            detected_lang_name = SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)
-            error = ERROR_CODES["LANGUAGE_MISMATCH"]
-            return JSONResponse(
-                status_code=400,
-                content={"errorCode": error["errorCode"], "message": f"{error['message']}: Text appears to be {detected_lang_name} but language is set to English"}
-            )
-        
-        # As a failsafe, generate the wav file first and read it back
-        timestamp = int(time.time())
-        wav_path = f"outputs/output_{timestamp}.wav"
-        opus_path = f"outputs/output_{timestamp}.opus"
-        
-        try:
-            # Generate wav file first to avoid array handling issues
-            if language == "en":
-                global_tts.tts_to_file(text=text, file_path=wav_path)
-            else:
-                global_chinese_tts.tts_to_file(
-                    text=text,
-                    file_path=wav_path,
-                    speaker_wav=sample_wav_path,
-                    language=language
-                )
-            
-            # Read the wav file
-            sample_rate, wav_array = wavfile.read(wav_path)
-            wav_array = wav_array.astype(np.float32) / 32767.0  # Convert to float [-1,1]
-        except Exception as e:
-            print(f"Error in tts_to_file: {e}")
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "errorCode": ERROR_CODES["TTS_GENERATION_ERROR"]["errorCode"],
-                    "message": ERROR_CODES["TTS_GENERATION_ERROR"]["message"],
-                    "details": str(e)
-                }
-            )
-        
-        # Binary stream generator for WAV format
-        async def wav_stream_generator():
-            # Create WAV header first
-            sample_rate = 22050
-            bits_per_sample = 16
-            channels = 1
-            
-            # Create a buffer for the WAV header
-            header_buffer = io.BytesIO()
-            
-            # RIFF header
-            header_buffer.write(b'RIFF')
-            header_buffer.write(b'\x00\x00\x00\x00')  # placeholder for file size
-            header_buffer.write(b'WAVE')
-            
-            # Format chunk
-            header_buffer.write(b'fmt ')
-            header_buffer.write(struct.pack('<I', 16))  # subchunk size (16 for PCM)
-            header_buffer.write(struct.pack('<H', 1))   # PCM format
-            header_buffer.write(struct.pack('<H', channels))  # channels
-            header_buffer.write(struct.pack('<I', sample_rate))  # sample rate
-            header_buffer.write(struct.pack('<I', sample_rate * channels * bits_per_sample // 8))  # byte rate
-            header_buffer.write(struct.pack('<H', channels * bits_per_sample // 8))  # block align
-            header_buffer.write(struct.pack('<H', bits_per_sample))  # bits per sample
-            
-            # Data chunk header
-            header_buffer.write(b'data')
-            header_buffer.write(b'\x00\x00\x00\x00')  # placeholder for data size
-            
-            # Send the header
-            yield header_buffer.getvalue()
-            
-            # Buffer to collect audio data for size calculations
-            data_buffer = bytearray()
-            
-            # We already have the wav_array from the file
-            wav = wav_array
-            
-            # Normalize and convert to 16-bit PCM
-            wav = np.clip(wav, -1, 1)
-            wav = (wav * 32767).astype(np.int16)
-            
-            # Make sure wav is a 1D array
-            if wav.ndim == 0:
-                wav = np.array([wav.item()], dtype=np.int16)
-            
-            # Stream audio chunks
-            chunk_size = 1024  # Samples per chunk
-            total_samples = len(wav)
-            
-            for i in range(0, total_samples, chunk_size):
-                chunk = wav[i:min(i + chunk_size, total_samples)]
-                chunk_bytes = chunk.tobytes()
-                data_buffer.extend(chunk_bytes)
-                yield chunk_bytes
-            
-            # Calculate sizes and update the header
-            data_size = len(data_buffer)
-            file_size = data_size + 36  # 36 is the size of the header minus 8 bytes
-            
-            # Create updated header with correct sizes
-            header_buffer = io.BytesIO()
-            header_buffer.write(b'RIFF')
-            header_buffer.write(struct.pack('<I', file_size))
-            header_buffer.write(b'WAVE')
-            header_buffer.write(b'fmt ')
-            header_buffer.write(struct.pack('<I', 16))
-            header_buffer.write(struct.pack('<H', 1))
-            header_buffer.write(struct.pack('<H', channels))
-            header_buffer.write(struct.pack('<I', sample_rate))
-            header_buffer.write(struct.pack('<I', sample_rate * channels * bits_per_sample // 8))
-            header_buffer.write(struct.pack('<H', channels * bits_per_sample // 8))
-            header_buffer.write(struct.pack('<H', bits_per_sample))
-            header_buffer.write(b'data')
-            header_buffer.write(struct.pack('<I', data_size))
-            
-            # Note: We don't send this updated header because 
-            # clients have already processed the initial header
-            
-            # Schedule WAV cleanup without waiting for it to complete
-            asyncio.create_task(async_clean_wav_files())
-        
-        # Binary stream generator for Opus format
-        async def opus_stream_generator():
-            # We already have the wav file, so convert to opus
-            
-            if not os.path.exists(wav_path):
-                error = ERROR_CODES["TTS_GENERATION_ERROR"]
-                raise Exception(f"{error['message']}: WAV file not found")
-            
-            # Convert the WAV file to Opus
-            convert_wav_to_opus(wav_path, opus_path)
-            
-            if not os.path.exists(opus_path):
-                error = ERROR_CODES["TTS_GENERATION_ERROR"]
-                raise Exception(f"{error['message']}: Opus conversion failed")
-            
-            # Read the opus file and stream it in chunks
-            with open(opus_path, 'rb') as opus_file:
-                opus_data = opus_file.read()
-            
-            # Stream the opus data in chunks
-            opus_chunk_size = 1024  # Bytes per chunk
-            for i in range(0, len(opus_data), opus_chunk_size):
-                opus_chunk = opus_data[i:min(i + opus_chunk_size, len(opus_data))]
-                yield opus_chunk
-            
-            # Schedule WAV cleanup without waiting for it to complete
-            asyncio.create_task(async_clean_wav_files())
-        
-        # Choose the appropriate generator based on format
-        if audio_format == "wav":
-            generator = wav_stream_generator()
-            media_type = "audio/wav"
-            filename = f"tts_output_{int(time.time())}.wav"
-        else:  # opus
-            generator = opus_stream_generator()
-            media_type = "audio/opus"
-            filename = f"tts_output_{int(time.time())}.opus"
-        
-        # Return the streaming response
-        return StreamingResponse(
-            generator,
-            media_type=media_type,
-            headers={
-                "Content-Disposition": f"attachment; filename={filename}"
-            }
-        )
-        
-    except Exception as e:
-        print(f"TTS Error: {str(e)}")
-        error = ERROR_CODES["TTS_GENERATION_ERROR"]
-        return JSONResponse(
-            status_code=500,
-            content={
-                "errorCode": error["errorCode"], 
-                "message": error["message"], 
-                "details": str(e)
-            }
-        )
-
-@app.get("/test")
-async def test_endpoint():
-    """
-    Simple test endpoint that returns a JSON response.
-    Used to measure round-trip time from client to server and back.
-    """
-    return {
-        "status": "success",
-        "timestamp": time.time(),
-        "message": "API is operational"
-    }
-
-# Helper function to save segment audio
-async def save_segment_audio_background(wav_array, segment_path, audio_format):
-    try:
-        print(f"Saving segment audio to {segment_path}")
-        
-        if audio_format == "wav":
-            # Save WAV file directly
-            wavfile.write(segment_path, 22050, wav_array)
-        else:  # opus
-            # Save temporary WAV first
-            temp_wav_path = segment_path.replace(".opus", ".temp.wav")
-            
-            # Only trim silence if we have valid audio
-            if len(wav_array) > 0:
-                # Make a copy to avoid modifying the original array
-                trimmed_wav = wav_array.copy()
-                
-                # Find the last non-silent sample (where absolute value is above threshold)
-                threshold = 50  # Lower threshold for silence detection
-                
-                # Check the entire file from end, don't limit to a percentage
-                # This will handle cases where silence is a large portion of the file
-                last_idx = len(trimmed_wav) - 1
-                for i in range(len(trimmed_wav) - 1, 0, -1):
-                    if abs(trimmed_wav[i]) > threshold:
-                        # Found last meaningful sample, add small buffer (30ms at 22050Hz = ~660 samples)
-                        last_idx = min(i + 660, len(trimmed_wav))
-                        break
-                
-                # Only trim if we found a clear silence section and it's not too close to the end
-                if last_idx < len(trimmed_wav) - 500:  # Only trim if there's significant silence (>500 samples)
-                    trimmed_wav = trimmed_wav[:last_idx]
-                    wavfile.write(temp_wav_path, 22050, trimmed_wav)
-                    print(f"Trimmed {len(wav_array) - len(trimmed_wav)} silent samples from end ({((len(wav_array) - len(trimmed_wav)) / len(wav_array)) * 100:.1f}% of file)")
-                else:
-                    # Just use the original audio
-                    wavfile.write(temp_wav_path, 22050, wav_array)
-                    print(f"No significant silence found at end of segment")
-            else:
-                # Just use the original audio
-                wavfile.write(temp_wav_path, 22050, wav_array)
-            
-            # Convert to opus
-            convert_wav_to_opus(temp_wav_path, segment_path)
-            
-            # Remove temporary WAV
-            try:
-                os.remove(temp_wav_path)
-            except:
-                pass
-            
-    except Exception as e:
-        print(f"Error saving segment audio: {e}")
-
-# Helper function to combine audio segments
-async def combine_audio_segments_background(segment_files, full_audio_path, audio_format):
-    try:
-        print(f"Combining {len(segment_files)} segments into {full_audio_path}")
-        
-        # Give segments a longer moment to finish saving, especially for longer lists
-        await asyncio.sleep(min(1.0, 0.1 * len(segment_files)))
-        
-        # Keep track of files that actually exist
-        valid_segment_files = []
-        
-        # First verify all segment files exist
-        for segment_file in segment_files:
-            # Wait for file to exist (max 5 seconds)
-            for _ in range(50):
-                if os.path.exists(segment_file):
-                    valid_segment_files.append(segment_file)
-                    break
-                await asyncio.sleep(0.1)
-            
-            if not os.path.exists(segment_file):
-                print(f"Warning: segment file {segment_file} not found, skipping")
-        
-        print(f"Found {len(valid_segment_files)} valid segment files out of {len(segment_files)}")
-        
-        if not valid_segment_files:
-            print("No valid segment files found, cannot create combined audio")
-            return
-            
-        if audio_format == "wav":
-            # For WAV, we can concatenate PCM data
-            combined_audio = None
-            
-            for segment_file in valid_segment_files:
-                try:
-                    sample_rate, segment_audio = wavfile.read(segment_file)
-                    
-                    if combined_audio is None:
-                        combined_audio = segment_audio
-                    else:
-                        combined_audio = np.concatenate((combined_audio, segment_audio))
-                except Exception as e:
-                    print(f"Error reading segment {segment_file}: {e}")
-            
-            if combined_audio is not None:
-                wavfile.write(full_audio_path, 22050, combined_audio)
-                print(f"Saved combined WAV to {full_audio_path}")
-        
-        elif audio_format == "mp3":
-            # For MP3, we need to decode all files to WAV, combine them, then re-encode
-            # This avoids LAME header/footer issues
-            
-            # Create temp directory for processing
-            temp_dir = f"outputs/temp_{int(time.time())}"
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            try:
-                # Extract WAV files from MP3 for processing
-                wav_files = []
-                
-                for i, segment in enumerate(valid_segment_files):
-                    # Create WAV file from MP3
-                    wav_path = f"{temp_dir}/segment_{i}.wav"
-                    subprocess.run([
-                        "ffmpeg",
-                        "-i", segment,
-                        "-ar", "24000",  # Ensure consistent sample rate
-                        wav_path,
-                        "-y"
-                    ], check=False, capture_output=True)
-                    
-                    if os.path.exists(wav_path):
-                        wav_files.append(wav_path)
-                
-                # Create overlapping segments and combine WAV files
-                if len(wav_files) > 0:
-                    # Create intermediate overlapping WAV file
-                    overlapped_wav = f"{temp_dir}/overlapped.wav"
-                    
-                    # Create list of overlapping segments
-                    overlapped_segments = []
-                    
-                    # Process the wav files to create overlapping segments
-                    for i, wav_file in enumerate(wav_files):
-                        try:
-                            sample_rate, audio = wavfile.read(wav_file)
-                            
-                            # Skip empty files
-                            if len(audio) == 0:
-                                continue
-                                
-                            # Add to list for overlapping
-                            overlapped_segments.append(audio)
-                        except Exception as e:
-                            print(f"Error processing WAV file {wav_file}: {e}")
-                    
-                    # Combine with overlap
-                    if len(overlapped_segments) > 0:
-                        combined = []
-                        # Increase overlap for smoother transitions - now ~50ms (from 25ms)
-                        overlap_samples = 1100  # ~50ms overlap at 22050Hz
-                        
-                        for i, segment in enumerate(overlapped_segments):
-                            if i == 0:
-                                # First segment, add entirely
-                                combined = segment
-                            else:
-                                # For subsequent segments, overlap with previous
-                                if len(combined) > overlap_samples:
-                                    # Calculate overlap
-                                    overlap_start = len(combined) - overlap_samples
-                                    
-                                    # Smoother crossfade weights using a cosine curve
-                                    # This creates a more natural transition than linear fading
-                                    fade_positions = np.linspace(0, np.pi, overlap_samples)
-                                    fade_in = (1 - np.cos(fade_positions)) / 2  # Cosine fade in (smoother)
-                                    fade_out = (1 + np.cos(fade_positions)) / 2  # Cosine fade out (smoother)
-                                    
-                                    # Apply crossfade to overlapping region
-                                    overlap_region = combined[overlap_start:] * fade_out + segment[:overlap_samples] * fade_in
-                                    
-                                    # Combine: previous audio (excluding overlap) + crossfaded overlap + new segment
-                                    combined = np.concatenate([combined[:overlap_start], overlap_region, segment[overlap_samples:]])
-                                else:
-                                    # If previous segment too short, just concatenate
-                                    combined = np.concatenate([combined, segment])
-                        
-                        # Save the combined WAV
-                        wavfile.write(overlapped_wav, 24000, combined.astype(np.int16))
-                        
-                        # Convert to final MP3 with clean settings
-                        subprocess.run([
-                            "ffmpeg",
-                            "-i", overlapped_wav,
-                            "-c:a", "libmp3lame",
-                            "-b:a", "128k",  # Standard bitrate
-                            "-q:a", "3",     # Quality setting 0-9 (lower is better)
-                            "-ac", "1",      # Mono
-                            full_audio_path,
-                            "-y"
-                        ], check=False, capture_output=True)
-                        
-                        print(f"Saved combined MP3 to {full_audio_path} with enhanced crossfaded overlaps")
-                    else:
-                        print("No valid overlapped segments for MP3 combination")
-                else:
-                    print("No valid WAV files extracted from MP3 segments")
-            finally:
-                # Clean up temp directory
-                try:
-                    for file in os.listdir(temp_dir):
-                        os.remove(os.path.join(temp_dir, file))
-                    os.rmdir(temp_dir)
-                except Exception as e:
-                    print(f"Error cleaning up temp directory: {e}")
-        
-        else:  # opus
-            # For opus, we need to use ffmpeg to decode, create overlapping segments, and re-encode
-            
-            # Create temp directory for processing
-            temp_dir = f"outputs/temp_{int(time.time())}"
-            os.makedirs(temp_dir, exist_ok=True)
-            
-            try:
-                # Extract WAV files from opus for processing
-                wav_files = []
-                
-                for i, segment in enumerate(valid_segment_files):
-                    # Create WAV file from opus
-                    wav_path = f"{temp_dir}/segment_{i}.wav"
-                    subprocess.run([
-                        "ffmpeg",
-                        "-i", segment,
-                        "-ar", "22050",  # Ensure consistent sample rate
-                        wav_path,
-                        "-y"
-                    ], check=False, capture_output=True)
-                    
-                    if os.path.exists(wav_path):
-                        wav_files.append(wav_path)
-                
-                # Create overlapping segments and combine WAV files
-                if len(wav_files) > 0:
-                    # Create intermediate overlapping WAV file
-                    overlapped_wav = f"{temp_dir}/overlapped.wav"
-                    
-                    # Create list of overlapping segments
-                    overlapped_segments = []
-                    
-                    # Process the wav files to create overlapping segments
-                    for i, wav_file in enumerate(wav_files):
-                        try:
-                            sample_rate, audio = wavfile.read(wav_file)
-                            
-                            # Skip empty files
-                            if len(audio) == 0:
-                                continue
-                                
-                            # Add to list for overlapping
-                            overlapped_segments.append(audio)
-                        except Exception as e:
-                            print(f"Error processing WAV file {wav_file}: {e}")
-                    
-                    # Combine with overlap
-                    if len(overlapped_segments) > 0:
-                        combined = []
-                        # Increase overlap for smoother transitions - now ~50ms (from 25ms)
-                        overlap_samples = 1100  # ~50ms overlap at 22050Hz
-                        
-                        for i, segment in enumerate(overlapped_segments):
-                            if i == 0:
-                                # First segment, add entirely
-                                combined = segment
-                            else:
-                                # For subsequent segments, overlap with previous
-                                if len(combined) > overlap_samples:
-                                    # Calculate overlap
-                                    overlap_start = len(combined) - overlap_samples
-                                    
-                                    # Smoother crossfade weights using a cosine curve
-                                    # This creates a more natural transition than linear fading
-                                    fade_positions = np.linspace(0, np.pi, overlap_samples)
-                                    fade_in = (1 - np.cos(fade_positions)) / 2  # Cosine fade in (smoother)
-                                    fade_out = (1 + np.cos(fade_positions)) / 2  # Cosine fade out (smoother)
-                                    
-                                    # Apply crossfade to overlapping region
-                                    overlap_region = combined[overlap_start:] * fade_out + segment[:overlap_samples] * fade_in
-                                    
-                                    # Combine: previous audio (excluding overlap) + crossfaded overlap + new segment
-                                    combined = np.concatenate([combined[:overlap_start], overlap_region, segment[overlap_samples:]])
-                                else:
-                                    # If previous segment too short, just concatenate
-                                    combined = np.concatenate([combined, segment])
-                        
-                        # Save the combined WAV
-                        wavfile.write(overlapped_wav, 22050, combined.astype(np.int16))
-                        
-                        # Convert to final opus with higher quality settings
-                        subprocess.run([
-                            "ffmpeg",
-                            "-i", overlapped_wav,
-                            "-c:a", "libopus",
-                            "-b:a", "48k",  # Slightly higher bitrate for better quality
-                            "-application", "audio",  # Use 'audio' mode for better speech quality
-                            "-vbr", "on",
-                            "-compression_level", "10",  # Maximum compression quality
-                            full_audio_path,
-                            "-y"
-                        ], check=False, capture_output=True)
-                        
-                        print(f"Saved combined Opus to {full_audio_path} with enhanced crossfaded overlaps")
-                    else:
-                        # Fallback to simple concat
-                        print("No valid overlapped segments, falling back to simple concatenation")
-                        # Create a concat file for ffmpeg
-                        concat_file = f"{temp_dir}/concat.txt"
-                        with open(concat_file, 'w') as f:
-                            for segment in valid_segment_files:
-                                f.write(f"file '{os.path.abspath(segment)}'\n")
-                        
-                        # Use ffmpeg to concatenate files
-                        subprocess.run([
-                            "ffmpeg",
-                            "-f", "concat",
-                            "-safe", "0",
-                            "-i", concat_file,
-                            "-c", "copy",
-                            full_audio_path,
-                            "-y"
-                        ], check=False, capture_output=True)
-                else:
-                    # Fallback to simple concat if WAV extraction fails
-                    print("No valid WAV files, falling back to simple concatenation")
-                    # Create a concat file for ffmpeg
-                    concat_file = f"{temp_dir}/concat.txt"
-                    with open(concat_file, 'w') as f:
-                        for segment in valid_segment_files:
-                            f.write(f"file '{os.path.abspath(segment)}'\n")
-                    
-                    # Use ffmpeg to concatenate files
-                    subprocess.run([
-                        "ffmpeg",
-                        "-f", "concat",
-                        "-safe", "0",
-                        "-i", concat_file,
-                        "-c", "copy",
-                        full_audio_path,
-                        "-y"
-                    ], check=False, capture_output=True)
-                
-            finally:
-                # Clean up temp directory
-                try:
-                    for file in os.listdir(temp_dir):
-                        os.remove(os.path.join(temp_dir, file))
-                    os.rmdir(temp_dir)
-                except Exception as e:
-                    print(f"Error cleaning up temp directory: {e}")
-            
-    except Exception as e:
-        print(f"Error combining audio segments: {e}")
-        # Fallback to original basic method if everything else fails
-        try:
-            # Create a concat file for ffmpeg
-            concat_file = full_audio_path + ".txt"
-            with open(concat_file, 'w') as f:
-                for segment in valid_segment_files:
-                    f.write(f"file '{os.path.abspath(segment)}'\n")
-            
-            # Use ffmpeg to concatenate files
-            subprocess.run([
-                "ffmpeg",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", concat_file,
-                "-c", "copy",
-                full_audio_path,
-                "-y"
-            ], check=False, capture_output=True)
-            
-            # Remove concat file
-            os.remove(concat_file)
-        except Exception as inner_e:
-            print(f"Fallback concatenation also failed: {inner_e}")
-
-# Updated helper function to save TTS information including segment info
-async def save_tts_info_background(text, language, words_per_segment, segment_count, info_path, segment_files=None, full_audio_path=None):
-    try:
-        with open(info_path, 'w', encoding='utf-8') as f:
-            f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Language: {language}\n")
-            f.write(f"Words per segment: {words_per_segment}\n")
-            f.write(f"Total segments: {segment_count}\n")
-            
-            if segment_files:
-                f.write("\nSegment files:\n")
-                for i, file in enumerate(segment_files):
-                    f.write(f"  {i+1}: {os.path.basename(file)}\n")
-            
-            if full_audio_path:
-                f.write(f"\nFull audio: {os.path.basename(full_audio_path)}\n")
-            
-            f.write(f"\nText length: {len(text)} characters\n")
-            f.write(f"Text: {text[:1000]}")
-            if len(text) > 1000:
-                f.write("...(truncated)")
-        print(f"Saved TTS info to {info_path}")
-    except Exception as e:
-        print(f"Error saving TTS info: {e}")
-
-# Update the clean_wav_files function to accept exclude patterns
-async def async_clean_wav_files(exclude_patterns=None):
-    print("Starting cleanup process...")
-    
-    try:
-        if exclude_patterns is None:
-            exclude_patterns = []
-            
-        files = []
-        for ext in ['wav', 'opus']:
-            files.extend(glob.glob(f"outputs/*.{ext}"))
-        
-        # Filter out files matching exclude patterns
-        if exclude_patterns:
-            for pattern in exclude_patterns:
-                files = [f for f in files if not fnmatch.fnmatch(os.path.basename(f), pattern)]
-        
-        # Sort files by modification time (newest first)
-        files.sort(key=os.path.getmtime, reverse=True)
-        
-        # Keep the 5 most recent files, delete the rest
-        if len(files) > 5:
-            for file_to_delete in files[5:]:
-                try:
-                    os.remove(file_to_delete)
-                    # print(f"Deleted old audio file: {file_to_delete}")
-                except Exception as e:
-                    print(f"Error deleting file {file_to_delete}: {e}")
-        
-        print(f"Cleanup complete. Kept the {min(5, len(files))} most recent audio files.")
-    
-    except Exception as e:
-        print(f"Error during cleanup: {e}")
 
 @app.websocket("/raw-stream-tts")
 async def raw_stream_tts_endpoint(websocket: WebSocket, api_key: Optional[str] = Query(None)):
