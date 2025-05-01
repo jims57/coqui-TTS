@@ -1915,7 +1915,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 import io
                 
                 # Set up streaming parameters
-                stream_chunk_size = 2000  # Larger chunks for better continuity
+                stream_chunk_size = 10  # Larger chunks for better continuity
                 overlap_wav_len = 3072  # Overlap for smoother transitions
                 
                 print(f"Using stream_chunk_size={stream_chunk_size}, overlap_wav_len={overlap_wav_len}, speed={speed}")

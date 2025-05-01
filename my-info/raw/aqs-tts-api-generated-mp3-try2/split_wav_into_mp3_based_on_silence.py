@@ -109,9 +109,9 @@ def main(wavPath=None):
     # Split audio on silence
     chunks = split_audio_on_silence(
         audio,
-        min_silence_len=80,     # Detect phrase-level pauses
-        silence_thresh=-28,     # Moderate sensitivity
-        keep_silence=60         # Keep natural pauses
+        min_silence_len=80,     # 80ms: Minimum length of silence to be considered a pause between phrases
+        silence_thresh=-28,     # -28 dBFS: Audio below this threshold is considered silence (higher value = more sensitive)
+        keep_silence=60         # 60ms: Amount of silence to keep at the beginning and end of each segment for natural sound
     )
     
     if not chunks:
