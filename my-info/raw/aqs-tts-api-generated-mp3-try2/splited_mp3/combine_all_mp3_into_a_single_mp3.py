@@ -10,17 +10,17 @@ def natural_sort_key(s):
     """
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
 
-def combine_mp3_files():
+def combine_mp3_files(output_file="combined.mp3"):
     """
-    Combines all .mp3 files in the current directory into a single mp3 file.
+    Combines all .mp3 files in the splited_mp3 directory into a single mp3 file.
     Files are combined in numerical order based on their filenames.
-    The output file will be named with the base prefix of the input files plus "-full.mp3"
     """
-    # Get all .mp3 files in the current directory
-    mp3_files = glob.glob("*.mp3")
+    # Get all .mp3 files in the splited_mp3 directory
+    mp3_dir = "splited_mp3"
+    mp3_files = glob.glob(os.path.join(mp3_dir, "*.mp3"))
     
     if not mp3_files:
-        print("No .mp3 files found in the current directory.")
+        print(f"No .mp3 files found in the {mp3_dir} directory.")
         return False
     
     # Sort files naturally to ensure correct order (1, 2, 10 instead of 1, 10, 2)
@@ -29,19 +29,9 @@ def combine_mp3_files():
     print(f"Found {len(mp3_files)} mp3 files to combine.")
     print(f"Files will be combined in this order: {mp3_files}")
     
-    # Extract the base prefix from the first file (e.g., "1746087318369" from "1746087318369-1.mp3")
-    base_prefix = re.match(r'(.+?)-\d+\.mp3', mp3_files[0])
-    if base_prefix:
-        output_file = f"{base_prefix.group(1)}-full.mp3"
-    else:
-        output_file = "combined-full.mp3"
-    
     # Combine the mp3 files
     combined = AudioSegment.empty()
     for file in mp3_files:
-        # Skip the output file if it already exists in the directory
-        if file == output_file:
-            continue
         print(f"Adding {file} to combined mp3...")
         audio = AudioSegment.from_mp3(file)
         combined += audio
@@ -52,7 +42,12 @@ def combine_mp3_files():
     return True
 
 def main():
-    if combine_mp3_files():
+    # Save the combined mp3 in the splited_mp3 folder with the name combined_full.mp3
+    mp3_dir = "splited_mp3"
+    os.makedirs(mp3_dir, exist_ok=True)
+    output_file = os.path.join(mp3_dir, "combined_full.mp3")
+    
+    if combine_mp3_files(output_file):
         print("MP3 files combined successfully!")
     else:
         print("Failed to combine MP3 files.")
