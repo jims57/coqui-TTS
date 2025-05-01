@@ -12,14 +12,15 @@ def natural_sort_key(s):
 
 def combine_mp3_files(output_file="combined.mp3"):
     """
-    Combines all .mp3 files in the current directory into a single mp3 file.
+    Combines all .mp3 files in the splited_mp3 directory into a single mp3 file.
     Files are combined in numerical order based on their filenames.
     """
-    # Get all .mp3 files in the current directory
-    mp3_files = glob.glob("*.mp3")
+    # Get all .mp3 files in the splited_mp3 directory
+    mp3_dir = "splited_mp3"
+    mp3_files = glob.glob(os.path.join(mp3_dir, "*.mp3"))
     
     if not mp3_files:
-        print("No .mp3 files found in the current directory.")
+        print(f"No .mp3 files found in the {mp3_dir} directory.")
         return False
     
     # Sort files naturally to ensure correct order (1, 2, 10 instead of 1, 10, 2)
@@ -41,8 +42,10 @@ def combine_mp3_files(output_file="combined.mp3"):
     return True
 
 def main():
-    # Create output filename with timestamp
-    output_file = "combined_output.mp3"
+    # Save the combined mp3 in the splited_mp3 folder with the name combined_full.mp3
+    mp3_dir = "splited_mp3"
+    os.makedirs(mp3_dir, exist_ok=True)
+    output_file = os.path.join(mp3_dir, "combined_full.mp3")
     
     if combine_mp3_files(output_file):
         print("MP3 files combined successfully!")

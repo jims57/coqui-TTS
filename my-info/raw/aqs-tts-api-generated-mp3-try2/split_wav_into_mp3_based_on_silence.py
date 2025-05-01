@@ -3,8 +3,17 @@ import io
 import subprocess
 import numpy as np
 import argparse
+import glob
+import re
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
+
+def natural_sort_key(s):
+    """
+    Sort strings with numbers in a natural way.
+    For example: '1', '2', '10' instead of '1', '10', '2'
+    """
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]
 
 def convert_raw_to_wav(raw_file, sample_rate=24000, channels=1, bit_depth=16):
     """Convert a raw audio file to WAV format for processing."""
@@ -59,17 +68,30 @@ def export_chunks_to_mp3(chunks, output_dir, base_filename, sample_rate=24000, b
     
     return len(chunks)
 
+def find_full_raw_file():
+    """Find the most recent raw file with 'full' in its filename."""
+    raw_files = glob.glob("*full*.raw")
+    
+    if not raw_files:
+        print("No raw files with 'full' in their name found in the current directory.")
+        return None
+    
+    # Sort files naturally
+    raw_files.sort(key=natural_sort_key)
+    # Return the most recent one (assuming the sorting puts the newest last)
+    return raw_files[-1]
+
 def main(wavPath=None):
-    # Input raw file
-    raw_file = "1745912332914-full.raw"
+    # Find raw file with 'full' in the name
+    raw_file = find_full_raw_file()
     
     # Update raw_file if wavPath is provided
     if wavPath:
         raw_file = wavPath
     
     # Check if file exists
-    if not os.path.exists(raw_file):
-        print(f"Error: File {raw_file} not found.")
+    if not raw_file or not os.path.exists(raw_file):
+        print(f"Error: No suitable raw file found.")
         return
     
     # Output directory for MP3 segments
