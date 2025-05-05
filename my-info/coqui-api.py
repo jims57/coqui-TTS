@@ -457,6 +457,8 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 speaker_id = message.get("speakerId", None)
                 # Add parameter for speed - default to 1.0
                 speed = message.get("speed", 1.0)
+                # Add priorityTTS parameter
+                priority_tts = message.get("priorityTTS", "").lower()
                 
                 # Determine reference audio based on speakerId
                 if speaker_id is not None:
@@ -555,31 +557,6 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     })
                     continue
                 
-                # Use XTTS v2 model to generate audio streams
-                timestamp = int(time.time() * 1000)  # Millisecond timestamp
-                
-                # Create a cache key based on the reference audio path
-                cache_key = reference_audio
-                
-                # Check if we have cached latents for this reference audio
-                start_time = time.time()
-                if cache_key in global_cached_latents:
-                    print("Using cached speaker latents...")
-                    gpt_cond_latent, speaker_embedding = global_cached_latents[cache_key]
-                    cached_time = (time.time() - start_time) * 1000
-                    print(f"Retrieved cached speaker latents in {cached_time:.2f} ms")
-                else:
-                    # Compute speaker latents if not cached
-                    print("Computing speaker latents (not cached)...")
-                    with torch.inference_mode():
-                        gpt_cond_latent, speaker_embedding = global_streaming_model.get_conditioning_latents(audio_path=[reference_audio])
-                    
-                    # Cache the computed latents for future use
-                    global_cached_latents[cache_key] = (gpt_cond_latent, speaker_embedding)
-                    compute_time = (time.time() - start_time) * 1000
-                    print(f"Speaker latents computed and cached in {compute_time:.2f} ms")
-                
-                # Split text by punctuation for better TTS quality
                 # Define punctuation for splitting
                 punctuation_markers = ['.', '!', '?', ';', ',', ':', '。', '！', '、', '？', '；', '，', '：']
                 
@@ -635,6 +612,128 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Split the text
                 text_segments = split_by_punctuation(text)
                 print(f"Split text into {len(text_segments)} segments by punctuation")
+                
+                # Check if MeloTTS should be used
+                use_melo_tts = False
+                
+                # Map language codes to MeloTTS format
+                MELO_SUPPORTED_LANGUAGES = ["ZH", "EN", "ES", "FR", "JP", "KR"]
+                language_mapping = {
+                    "zh-cn": "ZH",
+                    "en": "EN",
+                    "es": "ES",
+                    "fr": "FR",
+                    "ja": "JP",
+                    "ko": "KR"
+                }
+                
+                # Determine if we should use MeloTTS
+                melo_language = language_mapping.get(language)
+                
+                if (audio_format == "mp3" and melo_language in MELO_SUPPORTED_LANGUAGES and 
+                    (priority_tts == "melo" or priority_tts == "")):
+                    print(f"Attempting to use MeloTTS for language: {language} (mapped to {melo_language})")
+                    use_melo_tts = True
+                
+                # Process with MeloTTS if applicable
+                if use_melo_tts:
+                    try:
+                        import aiohttp
+                        import async_timeout
+                        
+                        # Track time for first chunk processing
+                        start_time = time.time()
+                        first_chunk = True
+                        first_chunk_time = 0
+                        
+                        for segment_idx, segment in enumerate(text_segments):
+                            print(f"Processing segment {segment_idx+1}/{len(text_segments)} with MeloTTS: {segment[:50]}{'...' if len(segment) > 50 else ''}")
+                            
+                            # Prepare the payload for MeloTTS API
+                            melo_payload = {
+                                "text": segment,
+                                "language": melo_language,
+                                "speaker_id": 0,  # Default speaker ID
+                                "speed": speed,
+                                "audio_format": "mp3"
+                            }
+                            
+                            try:
+                                async with aiohttp.ClientSession() as session:
+                                    async with async_timeout.timeout(15):  # 15 second timeout
+                                        async with session.post("http://localhost:9003/tts", json=melo_payload) as response:
+                                            if response.status == 200:
+                                                # Stream the MP3 audio data directly to the client
+                                                mp3_data = await response.read()
+                                                
+                                                # Track timing for first chunk
+                                                if first_chunk:
+                                                    chunk_time = (time.time() - start_time) * 1000  # Time in milliseconds
+                                                    first_chunk_time = chunk_time
+                                                    print(f"Time to first chunk (MeloTTS): {first_chunk_time:.2f} ms")
+                                                    first_chunk = False
+                                                
+                                                # Send the MP3 data to the client
+                                                await websocket.send_bytes(mp3_data)
+                                                print(f"Sent MeloTTS MP3 data for segment {segment_idx+1} ({len(mp3_data)} bytes)")
+                                            else:
+                                                # If MeloTTS fails, break out of loop to fall back to Coqui TTS
+                                                response_text = await response.text()
+                                                print(f"MeloTTS API error: {response.status} - {response_text}")
+                                                raise Exception(f"MeloTTS API returned {response.status}: {response_text}")
+                            except Exception as melo_error:
+                                print(f"Error using MeloTTS for segment {segment_idx+1}: {str(melo_error)}")
+                                if segment_idx == 0:
+                                    # If first segment fails, fall back to Coqui TTS for all segments
+                                    print("Falling back to Coqui TTS for all segments")
+                                    use_melo_tts = False
+                                    break
+                                else:
+                                    # For subsequent segments, try next segment with MeloTTS
+                                    continue
+                        
+                        # If all segments were processed successfully with MeloTTS
+                        if use_melo_tts:
+                            # Send an empty chunk to signal completion
+                            await websocket.send_bytes(b'')
+                            
+                            # Print completion info
+                            print(f"All segments processed with MeloTTS. Time to first chunk: {first_chunk_time:.2f} ms")
+                            
+                            # Cleanup task if needed
+                            if not save_audio_file:
+                                print("Starting cleanup process...")
+                                asyncio.create_task(async_clean_wav_files())
+                            
+                            continue  # Skip the Coqui TTS processing
+                    except Exception as e:
+                        print(f"MeloTTS processing failed: {str(e)}. Falling back to Coqui TTS.")
+                        use_melo_tts = False
+                        # Continue to Coqui TTS processing
+                
+                # Use XTTS v2 model to generate audio streams
+                timestamp = int(time.time() * 1000)  # Millisecond timestamp
+                
+                # Create a cache key based on the reference audio path
+                cache_key = reference_audio
+                
+                # Check if we have cached latents for this reference audio
+                start_time = time.time()
+                if cache_key in global_cached_latents:
+                    print("Using cached speaker latents...")
+                    gpt_cond_latent, speaker_embedding = global_cached_latents[cache_key]
+                    cached_time = (time.time() - start_time) * 1000
+                    print(f"Retrieved cached speaker latents in {cached_time:.2f} ms")
+                else:
+                    # Compute speaker latents if not cached
+                    print("Computing speaker latents (not cached)...")
+                    with torch.inference_mode():
+                        gpt_cond_latent, speaker_embedding = global_streaming_model.get_conditioning_latents(audio_path=[reference_audio])
+                    
+                    # Cache the computed latents for future use
+                    global_cached_latents[cache_key] = (gpt_cond_latent, speaker_embedding)
+                    compute_time = (time.time() - start_time) * 1000
+                    print(f"Speaker latents computed and cached in {compute_time:.2f} ms")
                 
                 # Start streaming inference
                 print("Starting streaming inference on text segments...")
