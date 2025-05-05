@@ -676,6 +676,22 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                                 # Send the MP3 data to the client
                                                 await websocket.send_bytes(mp3_data)
                                                 print(f"Sent MeloTTS MP3 data for segment {segment_idx+1} ({len(mp3_data)} bytes)")
+                                                
+                                                # Save MP3 data to file if saveAudioFile is true
+                                                if save_audio_file:
+                                                    # Create a unique filename for this segment
+                                                    segment_filename = f"outputs/{timestamp}-melo-{segment_idx+1}.mp3"
+                                                    
+                                                    # Save the MP3 data to file
+                                                    try:
+                                                        with open(segment_filename, 'wb') as f:
+                                                            f.write(mp3_data)
+                                                        print(f"Saved MeloTTS MP3 data to {segment_filename}")
+                                                        
+                                                        # Add to chunk_files list for potential combining later
+                                                        chunk_files.append(segment_filename)
+                                                    except Exception as save_error:
+                                                        print(f"Error saving MeloTTS MP3 file: {save_error}")
                                             else:
                                                 # If MeloTTS fails, break out of loop to fall back to Coqui TTS
                                                 response_text = await response.text()
