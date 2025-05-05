@@ -6,3 +6,8 @@ echo "Jupyter Notebook started in background on port 9000"
 cd ~/TTS
 nohup python coqui-api.py > /var/log/coqui-api.log 2>&1 &
 echo "Coqui TTS API server started in background on port 9002"
+
+# Start the Melo TTS API server
+cd ~/MeloTTS
+nohup /root/TTS/melotts/bin/python melo-api.py > /var/log/melo-api.log 2>&1 &
+echo "Melo TTS API server started in background on port 9003"
