@@ -117,12 +117,11 @@ global_cached_latents = {}
 
 # Add this near the top of the file with other global variables
 SPEAKER_IDS = {
-    # 1: "reference_samples/andy-liu-en-1.wav",
-    1: "reference_samples/ms-speaker-female-1.mp3",
+    1: "reference_samples/andy-liu-en-1.wav",
     2: "reference_samples/jack-mark-en-1.wav",
     3: "reference_samples/leijun.wav",
     4: "reference_samples/speaker2.mp3",
-    5: "reference_samples/andy-liu-en-1.wav",
+    5: "reference_samples/ms-speaker-female-1.mp3",
     # Default to andy-liu-en-1.wav for any other value
 }
 
@@ -489,6 +488,10 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     original_speed = speed
                     speed = max(0.1, speed - 0.2)  # Ensure speed doesn't go below 0.1
                     print(f"Adjusted speed from {original_speed} to {speed} for speakerId=1 and language=en")
+                elif audio_format == "mp3" and (priority_tts == "melo" or priority_tts == "") and language == "zh":
+                    original_speed = speed
+                    speed = max(0.1, speed - 0.2)  # Ensure speed doesn't go below 0.1
+                    print(f"Adjusted speed from {original_speed} to {speed} for MeloTTS with Chinese language")
                 
                 # Check if there's a config flag in the message and skip text processing
                 if message.get("config", False):
@@ -519,7 +522,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
             if text.startswith('[') and text.endswith(']'):
                 text = text.strip('[]').strip('"\'')
             
-            print(f"Processing text: {text} with language: {language}, format: {audio_format}, saveAudioFile: {save_audio_file}")
+            print(f"Processing text: {text} with language: {language}, format: {audio_format}, speed: {speed}, speakerId: {speaker_id}, saveAudioFile: {save_audio_file}, priorityTTS: {priority_tts}")
             
             # Validate audio format
             if audio_format not in ["wav", "opus", "mp3", "raw"]:
