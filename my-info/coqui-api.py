@@ -488,7 +488,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     original_speed = speed
                     speed = max(0.1, speed - 0.2)  # Ensure speed doesn't go below 0.1
                     print(f"Adjusted speed from {original_speed} to {speed} for speakerId=1 and language=en")
-                elif audio_format == "mp3" and (priority_tts == "melo" or priority_tts == "") and language == "zh":
+                elif audio_format == "mp3" and (priority_tts == "melo" or priority_tts == "") and language == "zh-cn":
                     original_speed = speed
                     speed = max(0.1, speed - 0.2)  # Ensure speed doesn't go below 0.1
                     print(f"Adjusted speed from {original_speed} to {speed} for MeloTTS with Chinese language")
