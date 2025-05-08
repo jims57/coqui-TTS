@@ -459,6 +459,40 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Add priorityTTS parameter
                 priority_tts = message.get("priorityTTS", "").lower()
                 
+                # Handle new English language codes
+                english_variants = ["en-au", "en-hk", "en-sg", "en-in", "en-us", "en-gb"]
+                original_language = language
+                
+                # Map for MeloTTS speaker IDs based on language variants
+                melo_speaker_id_map = {
+                    "en-au": 3,         # EN-AU
+                    "en-hk": 4,         # EN-Default
+                    "en-sg": 4,         # EN-Default
+                    "en-in": 2,         # EN_INDIA
+                    "en-us": 0,         # EN-US
+                    "en-gb": 1          # EN-BR
+                }
+                
+                # Default MeloTTS speaker ID if not in map
+                melo_speaker_id = 0
+                
+                # Check if it's an English variant
+                if language in english_variants:
+                    # For MeloTTS, keep original language for speaker selection
+                    # For Coqui, convert to standard "en"
+                    if priority_tts == "melo" and audio_format == "mp3":
+                        # Map the language variant to appropriate MeloTTS speaker ID
+                        melo_speaker_id = melo_speaker_id_map.get(language, "EN-Default")
+                        # For MeloTTS, use uppercase "EN" for language
+                        language = "EN"
+                    else:
+                        # For Coqui or if MeloTTS is down, convert to standard "en"
+                        language = "en"
+                    
+                    print(f"Converted language '{original_language}' to '{language}' for TTS processing")
+                    if melo_speaker_id != 0:
+                        print(f"Will use MeloTTS speaker ID: {melo_speaker_id} for {original_language}")
+                
                 # Determine reference audio based on speakerId
                 if speaker_id is not None:
                     # Try to get the reference audio from the dictionary
@@ -531,18 +565,24 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 continue
             
             try:
+                # Store original language for reference (used with English variants)
+                original_language_for_validation = original_language if 'original_language' in locals() else language
+                
+                # For validation with Coqui, use lowercase language code
+                validation_language = language.lower() if language != "EN" else "en"
+                
                 # Validate language again in case it was changed in the message
-                if language != "en" and language not in SUPPORTED_LANGUAGES:
+                if validation_language != "en" and validation_language not in SUPPORTED_LANGUAGES:
                     error = ERROR_CODES["UNSUPPORTED_LANGUAGE"]
                     await websocket.send_json({
                         "errorCode": error["errorCode"], 
-                        "message": f"{error['message']}: {language}"
+                        "message": f"{error['message']}: {original_language_for_validation}"
                     })
                     continue
                 
                 # Check for language mismatch
                 detected_lang = detect_language(text)
-                if detected_lang and language == "en" and detected_lang != "en":
+                if detected_lang and validation_language == "en" and detected_lang != "en":
                     detected_lang_name = SUPPORTED_LANGUAGES.get(detected_lang, detected_lang)
                     error = ERROR_CODES["LANGUAGE_MISMATCH"]
                     await websocket.send_json({
@@ -621,7 +661,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 
                 # Map language codes to MeloTTS format
                 MELO_SUPPORTED_LANGUAGES = ["ZH", "EN", "ES", "FR", "JP", "KR"]
-                language_mapping = {
+                melo_language_mapping = {
                     "zh-cn": "ZH",
                     "en": "EN",
                     "es": "ES",
@@ -630,12 +670,12 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     "ko": "KR"
                 }
                 
-                # Determine if we should use MeloTTS
-                melo_language = language_mapping.get(language)
+                # Keep MeloTTS language as is if it's already in uppercase "EN"
+                melo_language = language if language == "EN" else melo_language_mapping.get(language)
                 
                 if (audio_format == "mp3" and melo_language in MELO_SUPPORTED_LANGUAGES and 
                     (priority_tts == "melo" or priority_tts == "")):
-                    print(f"Attempting to use MeloTTS for language: {language} (mapped to {melo_language})")
+                    print(f"Attempting to use MeloTTS for language: {original_language_for_validation} (mapped to {melo_language})")
                     use_melo_tts = True
                 
                 # Process with MeloTTS if applicable
@@ -656,10 +696,12 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                             melo_payload = {
                                 "text": segment,
                                 "language": melo_language,
-                                "speaker_id": 0,  # Default speaker ID
+                                "speaker_id": melo_speaker_id,  # Use mapped speaker ID from language variant
                                 "speed": speed,
                                 "audio_format": "mp3"
                             }
+                            
+                            print(f"MeloTTS request payload: language={melo_language}, speaker_id={melo_speaker_id}")
                             
                             try:
                                 async with aiohttp.ClientSession() as session:
@@ -706,6 +748,11 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                     # If first segment fails, fall back to Coqui TTS for all segments
                                     print("Falling back to Coqui TTS for all segments")
                                     use_melo_tts = False
+                                    
+                                    # For Coqui, make sure all English variants use standard "en"
+                                    if language == "EN" or original_language_for_validation in english_variants:
+                                        language = "en"
+                                        print(f"Converted language to 'en' for Coqui TTS fallback")
                                     break
                                 else:
                                     # For subsequent segments, try next segment with MeloTTS
@@ -728,6 +775,11 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     except Exception as e:
                         print(f"MeloTTS processing failed: {str(e)}. Falling back to Coqui TTS.")
                         use_melo_tts = False
+                        
+                        # For Coqui, ensure all English variants use standard "en"
+                        if language == "EN" or original_language_for_validation in english_variants:
+                            language = "en"
+                            print(f"Converted language to 'en' for Coqui TTS fallback")
                         # Continue to Coqui TTS processing
                 
                 # Use XTTS v2 model to generate audio streams
