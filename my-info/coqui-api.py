@@ -523,10 +523,15 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     original_speed = speed
                     speed = max(0.1, speed - 0.2)  # Ensure speed doesn't go below 0.1
                     print(f"Adjusted speed from {original_speed} to {speed} for speakerId=1 and language=en")
-                elif audio_format == "mp3" and (priority_tts == "melo" or priority_tts == "") and language == "zh-cn":
+                elif audio_format == "mp3" and (priority_tts == "melo" or priority_tts == "") and (language == "zh-cn" or language == "zh"):
                     original_speed = speed
                     speed = max(0.1, speed - 0.2)  # Ensure speed doesn't go below 0.1
                     print(f"Adjusted speed from {original_speed} to {speed} for MeloTTS with Chinese language")
+                # Adjust speed for MeloTTS with English variants - check all possible input formats
+                elif audio_format == "mp3" and (priority_tts == "melo" or priority_tts == "") and (language == "en" or language == "EN" or language in english_variants):
+                    original_speed = speed
+                    speed = max(0.1, speed - 0.2)  # Ensure speed doesn't go below 0.1
+                    print(f"Adjusted speed from {original_speed} to {speed} for MeloTTS with English variant: {language}")
                 
                 # Check if there's a config flag in the message and skip text processing
                 if message.get("config", False):
