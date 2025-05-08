@@ -466,10 +466,10 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Map for MeloTTS speaker IDs based on language variants
                 melo_speaker_id_map = {
                     "en-au": 3,         # EN-AU
-                    "en-hk": 4,         # EN-Default
-                    "en-sg": 4,         # EN-Default
+                    "en-hk": 0,         # EN-US (Chinese accent)
+                    "en-sg": 0,         # EN-US (Chinese accent)
                     "en-in": 2,         # EN_INDIA
-                    "en-us": 0,         # EN-US
+                    "en-us": 4,         # EN-Default (American accent)
                     "en-gb": 1          # EN-BR
                 }
                 
@@ -701,7 +701,9 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                                 "audio_format": "mp3"
                             }
                             
-                            print(f"MeloTTS request payload: language={melo_language}, speaker_id={melo_speaker_id}")
+                            # Add more detailed logging of the actual values being sent
+                            print(f"MeloTTS detailed request: language={melo_language} (original: {original_language_for_validation}), speaker_id={melo_speaker_id} (type: {type(melo_speaker_id).__name__})")
+                            print(f"MeloTTS request payload: {melo_payload}")
                             
                             try:
                                 async with aiohttp.ClientSession() as session:
