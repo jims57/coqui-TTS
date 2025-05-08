@@ -570,7 +570,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 original_language_for_validation = original_language if 'original_language' in locals() else language
                 
                 # For validation with Coqui, use lowercase language code
-                validation_language = language.lower() if language != "EN" else "en"
+                validation_language = language.lower() if language != "EN" and language != "ZH" else ("en" if language == "EN" else "zh-cn")
                 
                 # Validate language again in case it was changed in the message
                 if validation_language != "en" and validation_language not in SUPPORTED_LANGUAGES:
@@ -664,6 +664,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 MELO_SUPPORTED_LANGUAGES = ["ZH", "EN", "ES", "FR", "JP", "KR"]
                 melo_language_mapping = {
                     "zh-cn": "ZH",
+                    "zh": "ZH",
                     "en": "EN",
                     "es": "ES",
                     "fr": "FR",
@@ -671,13 +672,22 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     "ko": "KR"
                 }
                 
-                # Keep MeloTTS language as is if it's already in uppercase "EN"
-                melo_language = language if language == "EN" else melo_language_mapping.get(language)
+                # Keep MeloTTS language as is if it's already in uppercase "EN" or "ZH"
+                melo_language = language if language in ["EN", "ZH"] else melo_language_mapping.get(language)
                 
                 if (audio_format == "mp3" and melo_language in MELO_SUPPORTED_LANGUAGES and 
                     (priority_tts == "melo" or priority_tts == "")):
                     print(f"Attempting to use MeloTTS for language: {original_language_for_validation} (mapped to {melo_language})")
                     use_melo_tts = True
+                
+                # Set appropriate MeloTTS speaker ID for Chinese
+                if melo_language == "ZH":
+                    melo_speaker_id = 1  # For Chinese, use speaker ID 1
+                    print(f"Set MeloTTS speaker ID to 1 for Chinese language")
+                elif melo_language in ["ES", "FR", "JP", "KR"]:
+                    melo_speaker_id = 0  # For other non-English languages, use speaker ID 0
+                    print(f"Set MeloTTS speaker ID to 0 for {melo_language} language")
+                # (English speaker IDs are already set by the existing mapping)
                 
                 # Process with MeloTTS if applicable
                 if use_melo_tts:
