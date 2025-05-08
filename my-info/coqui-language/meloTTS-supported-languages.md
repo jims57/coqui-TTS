@@ -1,8 +1,9 @@
 
-| Accent | Language |
+| Language | language code |
 |--------|----------|
-| American accent | EN-US |
-| British accent | EN-BR |
-| Indian accent | EN_INDIA |
-| Australian accent | EN-AU |
-| Default accent | EN-Default |
+| English | EN |
+| Spanish | ES |
+| French | FR |
+| Chinese | ZH |
+| Japenese | JP |
+| Korean | KR |
