@@ -465,6 +465,7 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 
                 # Map for MeloTTS speaker IDs based on language variants
                 melo_speaker_id_map = {
+                    "en": 4,            # EN-Default (American accent) for default English
                     "en-au": 3,         # EN-AU
                     "en-hk": 0,         # EN-US (Chinese accent)
                     "en-sg": 0,         # EN-US (Chinese accent)
@@ -476,13 +477,13 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Default MeloTTS speaker ID if not in map
                 melo_speaker_id = 0
                 
-                # Check if it's an English variant
-                if language in english_variants:
+                # Check if it's an English variant or standard English
+                if language in english_variants or language == "en":
                     # For MeloTTS, keep original language for speaker selection
                     # For Coqui, convert to standard "en"
                     if priority_tts == "melo" and audio_format == "mp3":
                         # Map the language variant to appropriate MeloTTS speaker ID
-                        melo_speaker_id = melo_speaker_id_map.get(language, "EN-Default")
+                        melo_speaker_id = melo_speaker_id_map.get(language, 4)  # Default to EN-Default (4) if not in map
                         # For MeloTTS, use uppercase "EN" for language
                         language = "EN"
                     else:
