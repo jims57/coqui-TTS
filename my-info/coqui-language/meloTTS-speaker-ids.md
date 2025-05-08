@@ -1,5 +1,5 @@
 
-| Accent | language |
+| Accent | SpeakerId |
 |--------|----------|
 | American accent | EN-US |
 | British accent | EN-BR |
