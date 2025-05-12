@@ -9,8 +9,8 @@
  8: tts_models/et/cv/vits        # Estonian
  9: tts_models/ga/cv/vits        # Irish (Gaelic)
  10: tts_models/en/ek1/tacotron2
- 11: tts_models/en/ljspeech/tacotron2-DDC
- 12: tts_models/en/ljspeech/tacotron2-DDC_ph
+ 11: tts_models/en/ljspeech/tacotron2-DDC     # Tacotron2 with Dynamic Convolutional Attention - moderate inference speed
+ 12: tts_models/en/ljspeech/tacotron2-DDC_ph  # Tacotron2 with DDC using phonemes as input - slightly faster than character-based model
  13: tts_models/en/ljspeech/glow-tts
  14: tts_models/en/ljspeech/speedy-speech
  15: tts_models/en/ljspeech/tacotron2-DCA
@@ -35,9 +35,9 @@
  34: tts_models/zh-CN/baker/tacotron2-DDC-GST
  35: tts_models/nl/mai/tacotron2-DDC          # Dutch
  36: tts_models/nl/css10/vits                 # Dutch
- 37: tts_models/de/thorsten/tacotron2-DCA     # German
- 38: tts_models/de/thorsten/vits              # German
- 39: tts_models/de/thorsten/tacotron2-DDC     # German
+ 37: tts_models/de/thorsten/tacotron2-DCA     # German - Uses Dynamic Convolutional Attention mechanism for alignment
+ 38: tts_models/de/thorsten/vits              # German - End-to-end model with variational inference, faster synthesis and better quality
+ 39: tts_models/de/thorsten/tacotron2-DDC     # German - Uses Dynamic Convolution Decoder for improved stability
  40: tts_models/de/css10/vits-neon            # German
  41: tts_models/ja/kokoro/tacotron2-DDC       # Japanese
  42: tts_models/tr/common-voice/glow-tts      # Turkish
