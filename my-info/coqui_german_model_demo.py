@@ -20,6 +20,12 @@ else:
 
 print(f"Using device: {device}")
 
+# Print information about available models
+print("Available TTS models:")
+print(TTS().list_models())
+
+
+
 #【german】
 tts = TTS("tts_models/de/thorsten/vits").to(device)
 # Generate first sentence
@@ -36,3 +42,34 @@ tts.tts_to_file(text="Die Autobahnen in Deutschland haben keine Geschwindigkeits
 
 # Generate fifth sentence
 tts.tts_to_file(text="Heute habe ich in einem gemütlichen Café in der Altstadt einen leckeren Apfelstrudel gegessen.", file_path="output_5.wav")
+
+# Check if DeepSpeed is available and being used
+try:
+    import deepspeed
+    print(f"DeepSpeed version: {deepspeed.__version__}")
+    print("DeepSpeed is available")
+    
+    # Check if DeepSpeed is initialized
+    if hasattr(torch.distributed, 'is_initialized') and torch.distributed.is_initialized():
+        print("DeepSpeed is currently being used for distributed training/inference")
+    else:
+        print("DeepSpeed is available but not currently initialized for this session")
+except ImportError:
+    print("DeepSpeed is not installed")
+
+# Print additional acceleration information
+print("\nAcceleration Information:")
+if torch.cuda.is_available():
+    print(f"Number of GPUs available: {torch.cuda.device_count()}")
+    print(f"Current GPU memory usage: {torch.cuda.memory_allocated()/1024**2:.2f} MB")
+    print(f"Max GPU memory allocated: {torch.cuda.max_memory_allocated()/1024**2:.2f} MB")
+    
+    # Check for CUDA optimizations
+    print(f"CUDA Arch List: {torch.cuda.get_arch_list() if hasattr(torch.cuda, 'get_arch_list') else 'Not available'}")
+    print(f"CUDNN Enabled: {torch.backends.cudnn.enabled}")
+    print(f"CUDNN Benchmark: {torch.backends.cudnn.benchmark}")
+else:
+    print("Running on CPU only - no GPU acceleration available")
+
+print("\nPreparing to generate German TTS samples...")
+
