@@ -1,3 +1,35 @@
+# Coqui TTS Model Comparison: Speed vs Quality
+
+## Fastest Models
+- **Speedy-Speech** (#14): Optimized for speed with reasonable quality
+- **Glow-TTS** (#13, #32, #42, etc.): Fast inference with good quality
+- **FastPitch** (#18, #22): Designed for real-time applications with good quality
+
+## Highest Quality Models
+- **XTTS v2** (#1): State-of-the-art quality, multilingual, voice cloning, but slower inference
+- **XTTS v1.1** (#2): Excellent quality, multilingual, voice cloning capability
+- **VITS** (#16, #21, #29, etc.): High-quality with faster inference than Tacotron2
+- **Tortoise v2** (#26): Very high quality but extremely slow
+
+## Balanced Models (Speed vs Quality)
+- **VITS** (#16, #21, #29, etc.): Good balance of quality and speed
+- **Tacotron2-DDC** (#11, #28, #30, etc.): Moderate inference speed with good quality
+- **FastPitch** (#18, #22): Good quality with fast inference
+
+## Streaming Capability
+- **XTTS v2** and **XTTS v1.1** support streaming inference for real-time applications
+
+## Language Support
+- **XTTS v2** (#1): Supports 16 languages including English, Spanish, French, German, Chinese, Japanese, Korean
+- **YourTTS** (#3): Good multilingual support with voice cloning
+
+## Notes on Model Selection
+- For production with limited resources: Choose **VITS** or **FastPitch**
+- For highest quality regardless of speed: Choose **XTTS v2** or **Tortoise v2**
+- For real-time applications: Choose **Speedy-Speech**, **Glow-TTS**, or **FastPitch**
+- For multilingual applications: Choose **XTTS v2** or **YourTTS**
+ 
+ 
  Name format: type/language/dataset/model
  1: tts_models/multilingual/multi-dataset/xtts_v2
  2: tts_models/multilingual/multi-dataset/xtts_v1.1
