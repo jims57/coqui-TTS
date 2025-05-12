@@ -22,4 +22,17 @@ print(f"Using device: {device}")
 
 #【german】
 tts = TTS("tts_models/de/thorsten/vits").to(device)
-tts.tts_to_file(text="Ich bin ein Berliner und genieße das schöne Wetter in Deutschland.", file_path="output.wav")
+# Generate first sentence
+tts.tts_to_file(text="Ich bin ein Berliner und genieße das schöne Wetter in Deutschland.", file_path="output_1.wav")
+
+# Generate second sentence
+tts.tts_to_file(text="Die deutsche Küche ist bekannt für ihre Vielfalt an Würsten und Bieren.", file_path="output_2.wav")
+
+# Generate third sentence
+tts.tts_to_file(text="Meine Freunde und ich planen einen Ausflug in den Schwarzwald nächstes Wochenende.", file_path="output_3.wav")
+
+# Generate fourth sentence
+tts.tts_to_file(text="Die Autobahnen in Deutschland haben keine Geschwindigkeitsbegrenzung in bestimmten Abschnitten.", file_path="output_4.wav")
+
+# Generate fifth sentence
+tts.tts_to_file(text="Heute habe ich in einem gemütlichen Café in der Altstadt einen leckeren Apfelstrudel gegessen.", file_path="output_5.wav")
