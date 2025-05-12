@@ -1,50 +1,82 @@
-# Check if CUDA is being used and print device information
 import torch
 from TTS.api import TTS
 
-# Check if CUDA is available
-cuda_available = torch.cuda.is_available()
-print(f"CUDA available: {cuda_available}")
+# avaliable languages:
+# ['en', 'es', 'fr', 'de', 'it', 'pt', 'pl', 'tr', 'ru', 'nl', 'cs', 'ar', 'zh-cn', 'hu', 'ko', 'ja', 'hi']
 
-if cuda_available:
-    # Get the current device
-    current_device = torch.cuda.current_device()
-    device_name = torch.cuda.get_device_name(current_device)
-    device_count = torch.cuda.device_count()
-    
-    print(f"Current CUDA device: {current_device}")
-    print(f"CUDA device name: {device_name}")
-    print(f"Number of CUDA devices: {device_count}")
-    print(f"First TTS model is using: CUDA")
+# Model list:
+# tts_models/zh-CN/baker/tacotron2-DDC-GST
+
+# Get device
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+print(f"PyTorch version: {torch.__version__}")
+print(f"CUDA available: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    try:
+        print(f"CUDA version: {torch.version.cuda}")
+        print(f"GPU device name: {torch.cuda.get_device_name(0)}")
+        print(f"Current GPU device: {torch.cuda.current_device()}")
+        device = "cuda"
+    except Exception as e:
+        print(f"Error initializing CUDA: {e}")
+        print("Falling back to CPU")
+        device = "cpu"
 else:
-    print(f"First TTS model is using: CPU (CUDA not available)")
+    device = "cpu"
 
-# List all available models
-print("\nAvailable TTS Models:")
+print(f"Using device: {device}")	
+
+# List available 🐸TTS models
 print(TTS().list_models())
 
-# Use a standard model that should be available in all installations
-device = "cuda" if cuda_available else "cpu"
-print(f"\nUsing device: {device}")
-api = TTS(model_name="tts_models/en/ljspeech/tacotron2-DDC").to(device)
 
-# Print the model info - without trying to access model.parameters()
-print(f"\nModel loaded successfully")
-print(f"Model name: {api.model_name}")
 
-# Generate speech to file
-print("\nGenerating speech...")
-api.tts_to_file("This is a test.", file_path="output.wav")
-print(f"Audio saved to output.wav")
 
-# Example of other models you might try:
-# api = TTS(model_name="tts_models/en/ljspeech/glow-tts")
-# api = TTS(model_name="tts_models/en/ljspeech/vits")
+# ==== Example: [Multi-lingual] xtts_v2 ==
+# Init TTS
+# tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
 
-# TTS with on the fly voice conversion example
-# api = TTS("tts_models/en/ljspeech/vits")
-# api.tts_with_vc_to_file(
-#     "This is voice conversion test.",
-#     speaker_wav="target/speaker.wav",
-#     file_path="output_vc.wav"
-# )
+# print(tts.languages)
+# print('=== speakers ===')
+# print(tts.speakers)
+
+# ❗ Since this model is multi-lingual voice cloning model, we must set the target speaker_wav and language
+# Text to speech list of amplitude values as output
+#wav = tts.tts(text="Hello world!", speaker_wav="speaker_wavs/andy-liu-en-1.wav", language="en")
+
+# Andy Liu
+# tts.tts_to_file(text="The sun sets behind the mountains, casting long shadows across the valley.", speaker_wav="speaker_wavs/andy-liu-en-1.wav", language="en", file_path="output.wav")
+
+# (work)Jack Ma(en)
+# tts.tts_to_file(text="The sun sets behind the mountains, casting long shadows across the valley.", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="en", file_path="output.wav")
+
+# (work)Jack Ma(zh)
+# tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh", file_path="output.wav")
+
+# (work)Jack Ma(zh-cn)
+# tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh-cn", file_path="output.wav")
+
+# (work)Jack Ma(ja)
+# [install]:  pip install cutlet
+# tts.tts_to_file(text="彼は午後、窓際の心地よい肘掛け椅子に座って、面白い小説を夢中で読んでいた。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="ja", file_path="output.wav")
+
+
+# ==== Example: xtts_v1.1 ====
+# tts = TTS("tts_models/multilingual/multi-dataset/xtts_v1.1").to(device)
+# tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav", language="zh", file_path="output.wav")
+
+# ==== Example: (work)Use Chinese model(tacotron2-DDC-GST) ====
+# tts = TTS("tts_models/zh-CN/baker/tacotron2-DDC-GST").to(device)
+# tts.tts_to_file(text="他下午坐在窗边舒适的扶手椅上津津有味地读着一本引人入胜的小说。", speaker_wav="speaker_wavs/jack-mark-en-1.wav")
+
+# ==== Example: tts_models/en/ljspeech/fast_pitch ====
+# tts = TTS("tts_models/en/ljspeech/fast_pitch").to(device)
+# tts.tts_to_file(text="Children played happily in the park while their parents watched from nearby benches.", file_path="output.wav")
+
+
+# ==== 【German】 ====
+tts = TTS("tts_models/de/thorsten/tacotron2-DCA").to(device)
+tts.tts_to_file(text="Ich bin ein deutscher Mann.", file_path="output.wav")
+
+
