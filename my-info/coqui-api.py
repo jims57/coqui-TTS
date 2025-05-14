@@ -158,10 +158,14 @@ async def startup_event():
     """Initialize TTS models when the FastAPI app starts"""
     global global_tts, global_chinese_tts, global_streaming_model, global_streaming_config, global_german_tts
     
+    # Define device here so it's available for all model initializations
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     if global_tts is None:
         global_tts, global_chinese_tts = initialize_tts()
-        
-        # Initialize German TTS model
+    
+    # Initialize German TTS model separately (not tied to global_tts check)
+    if global_german_tts is None:
         try:
             print("Initializing German VITS model...")
             global_german_tts = TTS("tts_models/de/thorsten/vits").to(device)
@@ -173,7 +177,7 @@ async def startup_event():
     # Initialize the streaming XTTS v2 model
     if global_streaming_model is None:
         try:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            # device is already defined above
             from TTS.tts.configs.xtts_config import XttsConfig
             from TTS.tts.models.xtts import Xtts
             
@@ -692,13 +696,17 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                 # Handle German language with mp3 format - check before MeloTTS logic
                 use_german_model = False
                 if language == "de" and audio_format == "mp3" and global_german_tts is not None:
-                    print(f"Using German VITS model for language: {language}")
+                    print(f"Using German VITS model for language: {language}, global_german_tts exists: {global_german_tts is not None}")
                     use_german_model = True
+                
+                # Add debug prints to help diagnose what's happening
+                print(f"DEBUG - Model selection: language={language}, audio_format={audio_format}, use_german_model={use_german_model}, global_german_tts exists: {global_german_tts is not None}")
                 
                 # Keep MeloTTS language as is if it's already in uppercase "EN" or "ZH"
                 melo_language = language if language in ["EN", "ZH"] else melo_language_mapping.get(language)
                 
-                if (audio_format == "mp3" and melo_language in MELO_SUPPORTED_LANGUAGES and 
+                # Only use MeloTTS if we're not using German model and language is supported
+                if (not use_german_model and audio_format == "mp3" and melo_language in MELO_SUPPORTED_LANGUAGES and 
                     (priority_tts == "melo" or priority_tts == "")):
                     print(f"Attempting to use MeloTTS for language: {original_language_for_validation} (mapped to {melo_language})")
                     use_melo_tts = True
