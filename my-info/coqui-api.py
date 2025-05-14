@@ -128,9 +128,6 @@ SPEAKER_IDS = {
 # Default speaker reference audio to use if speakerId is invalid or not provided
 DEFAULT_SPEAKER_AUDIO = "reference_samples/ms-speaker-female-1.mp3"
 
-# Add this near the top of the file with other global variables
-global_german_tts = None
-
 def initialize_tts():
     global global_tts, global_chinese_tts
     try:
@@ -156,19 +153,10 @@ def initialize_tts():
 @app.on_event("startup")
 async def startup_event():
     """Initialize TTS models when the FastAPI app starts"""
-    global global_tts, global_chinese_tts, global_streaming_model, global_streaming_config, global_german_tts
+    global global_tts, global_chinese_tts, global_streaming_model, global_streaming_config
     
     if global_tts is None:
         global_tts, global_chinese_tts = initialize_tts()
-        
-        # Initialize German TTS model
-        try:
-            print("Initializing German VITS model...")
-            global_german_tts = TTS("tts_models/de/thorsten/vits").to(device)
-            print("German TTS model loaded successfully")
-        except Exception as e:
-            print(f"Error loading German TTS model: {e}")
-            global_german_tts = None
         
     # Initialize the streaming XTTS v2 model
     if global_streaming_model is None:
@@ -689,12 +677,6 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     "ko": "KR"
                 }
                 
-                # Handle German language with mp3 format - check before MeloTTS logic
-                use_german_model = False
-                if language == "de" and audio_format == "mp3" and global_german_tts is not None:
-                    print(f"Using German VITS model for language: {language}")
-                    use_german_model = True
-                
                 # Keep MeloTTS language as is if it's already in uppercase "EN" or "ZH"
                 melo_language = language if language in ["EN", "ZH"] else melo_language_mapping.get(language)
                 
@@ -702,100 +684,6 @@ async def audio_queue_service_endpoint_streaming(websocket: WebSocket, api_key: 
                     (priority_tts == "melo" or priority_tts == "")):
                     print(f"Attempting to use MeloTTS for language: {original_language_for_validation} (mapped to {melo_language})")
                     use_melo_tts = True
-                
-                # Process with German model if applicable
-                if use_german_model:
-                    try:
-                        # Track time for first chunk processing
-                        start_time = time.time()
-                        first_chunk = True
-                        first_chunk_time = 0
-                        
-                        for segment_idx, segment in enumerate(text_segments):
-                            print(f"Processing segment {segment_idx+1}/{len(text_segments)} with German VITS model: {segment[:50]}{'...' if len(segment) > 50 else ''}")
-                            
-                            with torch.inference_mode():
-                                # Generate German audio using the specialized model
-                                wav = global_german_tts.tts(text=segment)
-                            
-                            # Track timing for first chunk
-                            if first_chunk:
-                                chunk_time = (time.time() - start_time) * 1000  # Time in milliseconds
-                                first_chunk_time = chunk_time
-                                print(f"Time to first chunk (German TTS): {first_chunk_time:.2f} ms")
-                                first_chunk = False
-                            
-                            # Process audio for sending
-                            if isinstance(wav, torch.Tensor):
-                                wav_np = wav.squeeze().cpu().numpy()
-                            else:
-                                wav_np = np.array(wav)
-                            
-                            # Normalize and convert to 16-bit PCM
-                            wav_np = np.clip(wav_np, -1, 1)
-                            wav_np = (wav_np * 32767).astype(np.int16)
-                            
-                            # Create MP3 with FFmpeg
-                            process = subprocess.Popen(
-                                [
-                                    "ffmpeg",
-                                    "-f", "s16le",      # 16-bit PCM input
-                                    "-ar", "22050",     # Sample rate
-                                    "-ac", "1",         # Mono
-                                    "-i", "pipe:0",     # Read from stdin
-                                    "-c:a", "libmp3lame",
-                                    "-b:a", "128k",     # MP3 bitrate
-                                    "-f", "mp3",
-                                    "pipe:1"            # Output to stdout
-                                ],
-                                stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE
-                            )
-                            
-                            # Send the PCM data to ffmpeg and get mp3 data
-                            mp3_data, stderr = process.communicate(input=wav_np.tobytes())
-                            
-                            if process.returncode != 0:
-                                print(f"FFmpeg error: {stderr.decode('utf-8', errors='ignore')}")
-                                continue
-                            
-                            # Send the MP3 data to the client
-                            await websocket.send_bytes(mp3_data)
-                            print(f"Sent German TTS MP3 data for segment {segment_idx+1} ({len(mp3_data)} bytes)")
-                            
-                            # Save MP3 data to file if saveAudioFile is true
-                            if save_audio_file:
-                                # Create a unique filename for this segment
-                                segment_filename = f"outputs/{timestamp}-german-{segment_idx+1}.mp3"
-                                
-                                # Save the MP3 data to file
-                                try:
-                                    with open(segment_filename, 'wb') as f:
-                                        f.write(mp3_data)
-                                    print(f"Saved German TTS MP3 data to {segment_filename}")
-                                    
-                                    # Add to chunk_files list for potential combining later
-                                    chunk_files.append(segment_filename)
-                                except Exception as save_error:
-                                    print(f"Error saving German TTS MP3 file: {save_error}")
-                        
-                        # Send an empty chunk to signal completion
-                        await websocket.send_bytes(b'')
-                        
-                        # Print completion info
-                        print(f"All segments processed with German TTS. Time to first chunk: {first_chunk_time:.2f} ms")
-                        
-                        # Cleanup task if needed
-                        if not save_audio_file:
-                            print("Starting cleanup process...")
-                            asyncio.create_task(async_clean_wav_files())
-                        
-                        return # Skip other TTS processing
-                    except Exception as e:
-                        print(f"German TTS processing failed: {str(e)}. Falling back to other TTS.")
-                        use_german_model = False
-                        # Continue to other TTS processing methods
                 
                 # Set appropriate MeloTTS speaker ID for Chinese
                 if melo_language == "ZH":
